@@ -60,3 +60,7 @@ python main.py
 | GUI 整合 | 功能页 + 状态栏 + 设置 + 调试 | 已完成 |
 | 武将数据采集（OCR + 翻页） | 配将台数据源 | 规划中 |
 | 配将规则引擎 | 智能配将台 | 规划中 |
+
+## 许可证
+
+本项目基于 [GNU LGPL v3](LICENSE) 开源。项目动态链接依赖 [MaaFramework](https://github.com/MaaAssistantArknights/MaaFramework)（LGPL-3.0），采用相同许可证以保证兼容。
