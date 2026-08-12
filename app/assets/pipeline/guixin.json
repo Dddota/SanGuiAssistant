@@ -1,0 +1,127 @@
+{
+  "guixin_start": {
+    "recognition": "DirectHit",
+    "action": "DoNothing",
+    "next": ["guixin_find_entry"],
+    "pre_delay": 500
+  },
+  "guixin_find_entry": {
+    "recognition": "TemplateMatch",
+    "template": "guixin_entry.png",
+    "threshold": 0.7,
+    "action": "Click",
+    "post_delay": 2000,
+    "next": ["guixin_city_loop"],
+    "on_error": ["guixin_find_entry_retry"],
+    "timeout": 3000,
+    "times_limit": ["guixin_find_entry_count", 5]
+  },
+  "guixin_find_entry_retry": {
+    "recognition": "DirectHit",
+    "action": "DoNothing",
+    "pre_delay": 1000,
+    "next": ["guixin_find_entry"]
+  },
+  "guixin_city_loop": {
+    "recognition": "TemplateMatch",
+    "template": "guixin_go_btn.png",
+    "threshold": 0.7,
+    "action": "Click",
+    "post_delay": 2000,
+    "next": ["guixin_city_spin_loop"],
+    "on_error": ["guixin_city_scroll"],
+    "timeout": 5000
+  },
+  "guixin_city_spin_loop": {
+    "recognition": "TemplateMatch",
+    "template": "guixin_spin_btn.png",
+    "threshold": 0.65,
+    "action": "Click",
+    "post_delay": 2000,
+    "next": ["guixin_dismiss_reward"],
+    "on_error": ["guixin_close_and_return"],
+    "timeout": 5000
+  },
+  "guixin_dismiss_reward": {
+    "recognition": "DirectHit",
+    "action": "Click",
+    "target": [1050, 500],
+    "post_delay": 1000,
+    "next": ["guixin_dismiss_reward_2"]
+  },
+  "guixin_dismiss_reward_2": {
+    "recognition": "DirectHit",
+    "action": "Click",
+    "target": [1050, 300],
+    "post_delay": 1000,
+    "next": ["guixin_check_spin_btn", "guixin_dismiss_recover"]
+  },
+  "guixin_check_spin_btn": {
+    "recognition": "TemplateMatch",
+    "template": "guixin_spin_btn.png",
+    "threshold": 0.65,
+    "action": "DoNothing",
+    "next": ["guixin_city_spin_loop"],
+    "on_error": ["guixin_dismiss_recover"],
+    "timeout": 3000
+  },
+  "guixin_close_and_return": {
+    "recognition": "TemplateMatch",
+    "template": "guixin_close_x.png",
+    "threshold": 0.7,
+    "action": "Click",
+    "post_delay": 1500,
+    "next": ["guixin_dismiss_recover"],
+    "on_error": ["guixin_close_fallback"],
+    "timeout": 5000
+  },
+  "guixin_close_fallback": {
+    "recognition": "DirectHit",
+    "action": "Click",
+    "target": [1080, 60],
+    "post_delay": 1500,
+    "next": ["guixin_dismiss_recover"]
+  },
+  "guixin_dismiss_recover": {
+    "recognition": "DirectHit",
+    "action": "Click",
+    "target": [640, 680],
+    "post_delay": 1500,
+    "next": ["guixin_dismiss_chat"]
+  },
+  "guixin_dismiss_chat": {
+    "recognition": "TemplateMatch",
+    "template": "guixin_chat_send_btn.png",
+    "threshold": 0.7,
+    "action": "Click",
+    "target": [1000, 400],
+    "post_delay": 1500,
+    "next": ["guixin_find_entry"],
+    "on_error": ["guixin_find_entry"],
+    "timeout": 2000
+  },
+  "guixin_city_scroll": {
+    "recognition": "DirectHit",
+    "action": "Swipe",
+    "begin": [640, 500],
+    "end": [640, 280],
+    "duration": 500,
+    "post_delay": 1000,
+    "next": ["guixin_city_loop_check"],
+    "times_limit": ["guixin_scroll_count", 8]
+  },
+  "guixin_city_loop_check": {
+    "recognition": "TemplateMatch",
+    "template": "guixin_go_btn.png",
+    "threshold": 0.7,
+    "action": "DoNothing",
+    "next": ["guixin_city_loop"],
+    "on_error": ["guixin_finished"],
+    "timeout": 3000
+  },
+  "guixin_finished": {
+    "recognition": "DirectHit",
+    "action": "StopTask",
+    "next": []
+  }
+}

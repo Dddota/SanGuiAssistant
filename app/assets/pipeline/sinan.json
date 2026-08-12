@@ -1,0 +1,111 @@
+{
+  "sinan_start": {
+    "recognition": "DirectHit",
+    "action": "DoNothing",
+    "next": ["sinan_open_panel"],
+    "pre_delay": 500
+  },
+  "sinan_open_panel": {
+    "recognition": "TemplateMatch",
+    "template": "sinan_tab_btn.png",
+    "threshold": 0.7,
+    "action": "Click",
+    "post_delay": 1500,
+    "next": ["sinan_use_first"],
+    "on_error": ["sinan_open_retry"],
+    "timeout": 5000,
+    "times_limit": ["sinan_open_count", 3]
+  },
+  "sinan_open_retry": {
+    "recognition": "DirectHit",
+    "action": "Click",
+    "target": [100, 600],
+    "post_delay": 1000,
+    "next": ["sinan_open_panel"]
+  },
+  "sinan_use_first": {
+    "recognition": "DirectHit",
+    "action": "Click",
+    "target": [455, 645],
+    "post_delay": 4000,
+    "next": ["sinan_check_chest"]
+  },
+  "sinan_check_chest": {
+    "recognition": "TemplateMatch",
+    "template": "sinan_chest.png",
+    "threshold": 0.7,
+    "action": "DoNothing",
+    "next": ["sinan_collect_chest"],
+    "on_error": ["sinan_check_available"],
+    "timeout": 3000
+  },
+  "sinan_check_available": {
+    "recognition": "TemplateMatch",
+    "template": "sinan_unavailable_percent.png",
+    "threshold": 0.7,
+    "action": "DoNothing",
+    "next": ["sinan_finished"],
+    "on_error": ["sinan_collect_chest"],
+    "timeout": 3000
+  },
+  "sinan_collect_chest": {
+    "recognition": "TemplateMatch",
+    "template": "sinan_chest.png",
+    "threshold": 0.7,
+    "action": "Click",
+    "post_delay": 1500,
+    "next": ["sinan_dismiss_reward"],
+    "on_error": ["sinan_chest_retry"],
+    "timeout": 5000,
+    "times_limit": ["sinan_chest_count", 5]
+  },
+  "sinan_chest_retry": {
+    "recognition": "TemplateMatch",
+    "template": "sinan_village_popup.png",
+    "threshold": 0.7,
+    "action": "Click",
+    "target": [640, 300],
+    "post_delay": 1000,
+    "next": ["sinan_collect_chest"],
+    "on_error": ["sinan_chest_wait"]
+  },
+  "sinan_chest_wait": {
+    "recognition": "DirectHit",
+    "action": "DoNothing",
+    "pre_delay": 1500,
+    "next": ["sinan_collect_chest"]
+  },
+  "sinan_dismiss_reward": {
+    "recognition": "DirectHit",
+    "action": "Click",
+    "target": [640, 500],
+    "post_delay": 1000,
+    "next": ["sinan_dismiss_reward_2"]
+  },
+  "sinan_dismiss_reward_2": {
+    "recognition": "DirectHit",
+    "action": "Click",
+    "target": [640, 300],
+    "post_delay": 1000,
+    "next": ["sinan_check_more_chest"]
+  },
+  "sinan_check_more_chest": {
+    "recognition": "TemplateMatch",
+    "template": "sinan_chest.png",
+    "threshold": 0.7,
+    "action": "DoNothing",
+    "next": ["sinan_collect_chest"],
+    "on_error": ["sinan_use_first"],
+    "timeout": 3000
+  },
+  "sinan_no_more": {
+    "recognition": "DirectHit",
+    "action": "DoNothing",
+    "next": ["sinan_finished"]
+  },
+  "sinan_finished": {
+    "recognition": "DirectHit",
+    "action": "StopTask",
+    "next": []
+  }
+}
