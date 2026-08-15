@@ -9,9 +9,10 @@
     "recognition": "TemplateMatch",
     "template": "sinan_tab_btn.png",
     "threshold": 0.7,
+    "focus": true,
     "action": "Click",
-    "post_delay": 1500,
-    "next": ["sinan_use_first"],
+    "post_delay": 2000,
+    "next": ["sinan_panel_ready"],
     "on_error": ["sinan_open_retry"],
     "timeout": 5000,
     "times_limit": ["sinan_open_count", 3]
@@ -23,26 +24,98 @@
     "post_delay": 1000,
     "next": ["sinan_open_panel"]
   },
-  "sinan_use_first": {
+  "sinan_panel_ready": {
+    "recognition": "TemplateMatch",
+    "template": "sinan_first_item.png",
+    "threshold": 0.7,
+    "focus": true,
+    "action": "DoNothing",
+    "next": ["sinan_use_first"],
+    "on_error": ["sinan_panel_check_available"],
+    "timeout": 3000
+  },
+  "sinan_panel_check_available": {
+    "recognition": "TemplateMatch",
+    "template": "sinan_unavailable_percent.png",
+    "threshold": 0.7,
+    "focus": true,
+    "action": "DoNothing",
+    "next": ["sinan_finished"],
+    "on_error": ["sinan_panel_wait"],
+    "timeout": 3000
+  },
+  "sinan_panel_wait": {
     "recognition": "DirectHit",
+    "action": "DoNothing",
+    "pre_delay": 1500,
+    "next": ["sinan_panel_ready"],
+    "times_limit": ["sinan_panel_wait_count", 5]
+  },
+  "sinan_use_first": {
+    "recognition": "TemplateMatch",
+    "template": "sinan_first_item.png",
+    "threshold": 0.7,
+    "focus": true,
     "action": "Click",
-    "target": [455, 645],
-    "post_delay": 4000,
-    "next": ["sinan_check_chest"]
+    "post_delay": 3000,
+    "next": ["sinan_check_chest"],
+    "on_error": ["sinan_finished"],
+    "timeout": 3000
   },
   "sinan_check_chest": {
     "recognition": "TemplateMatch",
     "template": "sinan_chest.png",
     "threshold": 0.7,
+    "focus": true,
     "action": "DoNothing",
     "next": ["sinan_collect_chest"],
+    "on_error": ["sinan_check_village"],
+    "timeout": 5000
+  },
+  "sinan_check_village": {
+    "recognition": "TemplateMatch",
+    "template": "sinan_village_popup.png",
+    "threshold": 0.7,
+    "focus": true,
+    "action": "DoNothing",
+    "next": ["sinan_collect_village"],
     "on_error": ["sinan_check_available"],
     "timeout": 3000
+  },
+  "sinan_collect_village": {
+    "recognition": "TemplateMatch",
+    "template": "sinan_village_popup.png",
+    "threshold": 0.7,
+    "focus": true,
+    "action": "Click",
+    "post_delay": 2000,
+    "next": ["sinan_village_confirm"],
+    "on_error": ["sinan_check_available"],
+    "timeout": 3000
+  },
+  "sinan_village_confirm": {
+    "recognition": "TemplateMatch",
+    "template": "sinan_village_confirm_btn.png",
+    "threshold": 0.7,
+    "focus": true,
+    "action": "Click",
+    "post_delay": 1500,
+    "next": ["sinan_dismiss_reward"],
+    "on_error": ["sinan_village_confirm_fallback"],
+    "timeout": 3000
+  },
+  "sinan_village_confirm_fallback": {
+    "recognition": "DirectHit",
+    "action": "Click",
+    "target": [640, 500],
+    "post_delay": 1000,
+    "next": ["sinan_dismiss_reward"]
   },
   "sinan_check_available": {
     "recognition": "TemplateMatch",
     "template": "sinan_unavailable_percent.png",
     "threshold": 0.7,
+    "focus": true,
     "action": "DoNothing",
     "next": ["sinan_finished"],
     "on_error": ["sinan_collect_chest"],
@@ -52,6 +125,7 @@
     "recognition": "TemplateMatch",
     "template": "sinan_chest.png",
     "threshold": 0.7,
+    "focus": true,
     "action": "Click",
     "post_delay": 1500,
     "next": ["sinan_dismiss_reward"],
@@ -63,10 +137,9 @@
     "recognition": "TemplateMatch",
     "template": "sinan_village_popup.png",
     "threshold": 0.7,
-    "action": "Click",
-    "target": [640, 300],
-    "post_delay": 1000,
-    "next": ["sinan_collect_chest"],
+    "focus": true,
+    "action": "DoNothing",
+    "next": ["sinan_collect_village"],
     "on_error": ["sinan_chest_wait"]
   },
   "sinan_chest_wait": {
@@ -86,22 +159,8 @@
     "recognition": "DirectHit",
     "action": "Click",
     "target": [640, 300],
-    "post_delay": 1000,
-    "next": ["sinan_check_more_chest"]
-  },
-  "sinan_check_more_chest": {
-    "recognition": "TemplateMatch",
-    "template": "sinan_chest.png",
-    "threshold": 0.7,
-    "action": "DoNothing",
-    "next": ["sinan_collect_chest"],
-    "on_error": ["sinan_use_first"],
-    "timeout": 3000
-  },
-  "sinan_no_more": {
-    "recognition": "DirectHit",
-    "action": "DoNothing",
-    "next": ["sinan_finished"]
+    "post_delay": 1500,
+    "next": ["sinan_use_first"]
   },
   "sinan_finished": {
     "recognition": "DirectHit",

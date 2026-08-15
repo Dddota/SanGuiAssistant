@@ -28,8 +28,8 @@ class SinanTab(QWidget):
 
         self._init_ui()
         self.runner.status.connect(self._on_connect_status)
-        self.runner.log.connect(self._on_task_log)
-        self.runner.finished.connect(self._on_task_finished)
+        self.runner.sn_progress.connect(self._on_progress)
+        self.runner.sn_done.connect(self._on_task_finished)
 
     def _on_connect_status(self, ok: bool, msg: str) -> None:
         if ok:
@@ -137,14 +137,14 @@ class SinanTab(QWidget):
         self._append_log("=" * 40)
         self._append_log("开始执行司南任务")
 
-        self.runner.start(task_name="sinan_start")
+        self.runner.start_sinan()
 
     def _on_stop(self) -> None:
         if self.runner.running:
             self.runner.stop()
             self._append_log("已请求停止")
 
-    def _on_task_log(self, msg: str) -> None:
+    def _on_progress(self, msg: str) -> None:
         self._append_log(msg)
 
     def _on_task_finished(self, success: bool) -> None:

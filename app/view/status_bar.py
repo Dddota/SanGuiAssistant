@@ -13,6 +13,8 @@ from app.core.task_runner import TaskRunner
 TASK_NAMES = {
     "guixin_start": "一键归心",
     "sinan_start": "自动司南",
+    "zhan_gong": "自动刷战功",
+    "trade": "辅助交易",
 }
 
 

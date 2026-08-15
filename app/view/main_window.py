@@ -13,6 +13,8 @@ from app.view.peijiang_tab import PeijiangTab
 from app.view.settings_tab import SettingsTab
 from app.view.sinan_tab import SinanTab
 from app.view.status_bar import GlobalStatusBar
+from app.view.trade_tab import TradeTab
+from app.view.zhan_gong_tab import ZhanGongTab
 
 
 class MainWindow(MSFluentWindow):
@@ -26,9 +28,11 @@ class MainWindow(MSFluentWindow):
 
         self.guixin_tab = GuixinTab(self.runner, self)
         self.sinan_tab = SinanTab(self.runner, self)
-        self.peijiang_tab = PeijiangTab(self)
+        self.peijiang_tab = PeijiangTab(self.runner, self)
         self.settings_tab = SettingsTab(self.runner, self)
         self.debug_tab = DebugTab(self.runner, self)
+        self.zhan_gong_tab = ZhanGongTab(self.runner, self)
+        self.trade_tab = TradeTab(self.runner, self)
 
         self.addSubInterface(
             self.guixin_tab,
@@ -46,6 +50,18 @@ class MainWindow(MSFluentWindow):
             self.peijiang_tab,
             QIcon(),
             "智能配将台",
+            position=NavigationItemPosition.TOP,
+        )
+        self.addSubInterface(
+            self.zhan_gong_tab,
+            QIcon(),
+            "自动刷战功",
+            position=NavigationItemPosition.TOP,
+        )
+        self.addSubInterface(
+            self.trade_tab,
+            QIcon(),
+            "辅助交易",
             position=NavigationItemPosition.TOP,
         )
         self.addSubInterface(

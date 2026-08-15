@@ -41,7 +41,8 @@ sangui-ass/
 │           └── guixin.json
 ├── docs/
 │   ├── architecture.md
-│   └── guixin-flow.md           # 归心流程设计
+│   ├── guixin-flow.md           # 归心流程设计
+│   └── zhan_gong-flow.md        # 自动刷战功流程设计
 ├── requirements.txt
 └── main.py                      # 入口
 ```

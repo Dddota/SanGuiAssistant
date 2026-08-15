@@ -78,9 +78,20 @@ class MaaController:
         return self._controller
 
     def load_resource(self, resource_path: str) -> bool:
-        """加载资源包（pipeline + 模板图 + OCR）。"""
+        """加载资源包（pipeline + 模板图 + OCR 模型）。
+
+        OCR 模型目录（可选）：{resource_path}/model/，含 det.onnx / rec.onnx / keys.txt。
+        若存在则一并加载，否则 OCR 识别不可用（点识别将失败）。
+        """
         self._resource.post_bundle(resource_path).wait()
         logger.info("Resource loaded: %s", resource_path)
+        # 可选 OCR 模型（MAA 标准：{resource}/model/ocr/ 含 det.onnx/rec.onnx/keys.txt）
+        model_ocr = Path(resource_path) / "model" / "ocr"
+        if model_ocr.is_dir():
+            self._resource.post_ocr_model(str(model_ocr)).wait()
+            logger.info("OCR model loaded: %s", model_ocr)
+        else:
+            logger.warning("OCR model dir not found: %s", model_ocr)
         self._rebind_tasker()
         return True
 
@@ -109,16 +120,40 @@ class MaaController:
         task_name: str,
         callback: Optional[Callable[[str], None]] = None,
     ) -> bool:
-        """执行指定的 pipeline 任务（阻塞）。"""
+        """执行指定的 pipeline 任务（阻塞）。
+
+        若提供 callback，会临时开启 MAA 调试模式：让所有识别节点（含非 focus）
+        都产生识别回调，从而把模板命中/分数上报给日志，便于排查
+        「模板因背景色不一致匹配失败 → 点不到按钮」的问题。
+        任务结束后恢复原调试模式。
+        """
         if not self._tasker:
             raise RuntimeError("Tasker not initialized.")
 
+        prev_debug = False
         if callback is not None:
             self._tasker.add_sink(_TaskerEventSinkImpl(callback))
+            try:
+                prev_debug = bool(Tasker.set_debug_mode(True))
+            except Exception:  # noqa: BLE001
+                prev_debug = False
 
-        result = self._tasker.post_task(task_name).wait().get()
+        try:
+            result = self._tasker.post_task(task_name).wait().get()
+        finally:
+            if callback is not None:
+                try:
+                    Tasker.set_debug_mode(prev_debug)
+                except Exception:  # noqa: BLE001
+                    pass
         logger.info("Task %s finished. success=%s", task_name, result)
         return bool(result)
+
+    def input_text(self, text: str) -> None:
+        """模拟文本输入（用于搜索框等）。"""
+        if not self._controller:
+            raise RuntimeError("Controller not connected.")
+        self._controller.post_input_text(text).wait()
 
     def stop(self) -> None:
         """停止当前任务。"""
@@ -140,16 +175,58 @@ class MaaController:
             JTemplateMatch([template], threshold=[threshold]),
             arr,
         )
-        detail = job.wait().get() or {}
+        detail = job.wait().get()
+        if not detail:
+            return []
         boxes = []
-        for d in detail.get("filtered", []) or []:
-            box = d.get("box") or {}
-            boxes.append(
-                (box.get("x", 0), box.get("y", 0),
-                 box.get("w", 0), box.get("h", 0),
-                 d.get("score", 0.0))
-            )
+        for node in detail.nodes:
+            reco = getattr(node, "recognition", None)
+            for d in (getattr(reco, "filtered_results", None) or []):
+                box = d.box if isinstance(d.box, (list, tuple)) else (d.box.x, d.box.y, d.box.w, d.box.h)
+                boxes.append(
+                    (box[0], box[1], box[2], box[3], getattr(d, "score", 0.0))
+                )
         return boxes
+
+    def ocr(
+        self,
+        roi: tuple[int, int, int, int] | None = None,
+        expected: list[str] | None = None,
+    ) -> list[dict]:
+        """对当前屏幕做 OCR，返回识别结果列表。
+
+        roi 为 (x, y, w, h)；None 表示整屏。
+        expected 为期望文本列表（模糊匹配）；None 表示识别全部文本。
+        返回 [{"text": str, "box": (x,y,w,h), "score": float}, ...]。
+        """
+        if not self._controller or not self._tasker:
+            raise RuntimeError("Controller/Tasker not initialized.")
+        from maa.pipeline import JOCR, JRecognitionType
+        roi_val = roi if roi else (0, 0, 0, 0)
+        exp = expected if expected else []
+        job = self._tasker.post_recognition(
+            JRecognitionType.OCR,
+            JOCR(
+                expected=exp,
+                roi=roi_val,
+                threshold=0.3,
+            ),
+            self._controller.post_screencap().wait().get(),
+        )
+        detail = job.wait().get()
+        if not detail:
+            return []
+        results = []
+        for node in detail.nodes:
+            reco = getattr(node, "recognition", None)
+            for d in (getattr(reco, "filtered_results", None) or []):
+                box = d.box if isinstance(d.box, (list, tuple)) else (d.box.x, d.box.y, d.box.w, d.box.h)
+                results.append({
+                    "text": getattr(d, "text", ""),
+                    "box": (box[0], box[1], box[2], box[3]),
+                    "score": getattr(d, "score", 0.0),
+                })
+        return results
 
     def disconnect(self) -> None:
         """断开连接。"""
@@ -168,15 +245,52 @@ _NOISY_NOTIFICATIONS = {
 
 
 class _TaskerEventSinkImpl(TaskerEventSink):
-    """把 MAA Tasker 事件日志转发到 callback（已过滤冗余通知）。"""
+    """把 MAA Tasker 事件日志转发到 callback（已过滤冗余通知）。
+
+    模板匹配（TemplateMatch）节点额外上报命中/未命中与最高分，
+    便于排查因背景色/模板不一致导致『点不到按钮』的问题。
+    """
 
     def __init__(self, callback: Callable[[str], None]):
         super().__init__()
         self._callback = callback
 
+    def _log_recognition(self, tasker, details: dict) -> None:
+        """上报一次识别结果（带命中与分数）。"""
+        reco_id = details.get("reco_id")
+        if reco_id is None:
+            return
+        try:
+            det = tasker.get_recognition_detail(int(reco_id))
+        except Exception as e:  # noqa: BLE001
+            self._callback(f"[识别] 读取识别详情失败: {e}")
+            return
+        if not det:
+            return
+        node = details.get("name") or det.name
+        if det.algorithm == "TemplateMatch":
+            scores = []
+            for r in det.all_results:
+                if hasattr(r, "score"):
+                    scores.append(float(r.score))
+            best = max(scores) if scores else 0.0
+            if det.hit:
+                box = det.box
+                self._callback(
+                    f"[识别] {node} 命中 ({box.x},{box.y}) score={best:.2f}")
+            else:
+                self._callback(
+                    f"[识别][失败] {node} 未命中，最高score={best:.2f}"
+                    f"（可能背景色/模板不一致导致点不到按钮）")
+        else:
+            self._callback(f"[识别] {node} alg={det.algorithm} hit={det.hit}")
+
     def on_raw_notification(self, tasker, msg: str, details: dict) -> None:
         name = msg.split(":", 1)[0].strip().strip('"')
         if name in _NOISY_NOTIFICATIONS:
+            return
+        if name.startswith("Node.Recognition") and isinstance(details, dict):
+            self._log_recognition(tasker, details)
             return
         detail = details.get("detail", "") if isinstance(details, dict) else ""
         self._callback(f"[{name}] {detail}")

@@ -1,0 +1,53 @@
+{
+  "trade_start": {
+    "recognition": "DirectHit",
+    "action": "DoNothing",
+    "next": ["trade_open_panel"],
+    "pre_delay": 500
+  },
+  "trade_open_panel": {
+    "recognition": "TemplateMatch",
+    "template": "trade_main_btn.png",
+    "threshold": 0.7,
+    "action": "Click",
+    "post_delay": 1500,
+    "next": ["trade_open_trade"],
+    "on_error": ["trade_open_panel_retry"],
+    "timeout": 5000,
+    "times_limit": ["trade_main_btn_count", 5]
+  },
+  "trade_open_panel_retry": {
+    "recognition": "DirectHit",
+    "action": "DoNothing",
+    "pre_delay": 1000,
+    "next": ["trade_open_panel"]
+  },
+  "trade_open_trade": {
+    "recognition": "TemplateMatch",
+    "template": "trade_entry.png",
+    "threshold": 0.7,
+    "action": "Click",
+    "post_delay": 1500,
+    "next": ["trade_engine_loop"],
+    "on_error": ["trade_open_trade_retry"],
+    "timeout": 5000,
+    "times_limit": ["trade_entry_count", 5]
+  },
+  "trade_open_trade_retry": {
+    "recognition": "DirectHit",
+    "action": "DoNothing",
+    "pre_delay": 1000,
+    "next": ["trade_open_trade"]
+  },
+  "trade_engine_loop": {
+    "recognition": "DirectHit",
+    "action": "DoNothing",
+    "next": ["trade_finished"],
+    "pre_delay": 500
+  },
+  "trade_finished": {
+    "recognition": "DirectHit",
+    "action": "StopTask",
+    "next": []
+  }
+}
