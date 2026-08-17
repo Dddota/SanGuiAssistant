@@ -66,6 +66,7 @@ class ZhanGongEngine:
         "攻打", "突围", "民心", "关闭", "出征", "加成", "免费", "驻守",
         "组队", "队伍", "我的",
         "剩余兵力", "剩余", "兵士",
+        "暂无队伍", "无队伍", "没有队伍", "暂无",
     }
 
     # 队伍名前缀噪音：即使后面跟"队"字也不该当人名（页签/UI词被 OCR 截断的变体）
@@ -74,6 +75,7 @@ class ZhanGongEngine:
         "我的", "临时", "剩余", "兵法", "司南", "补给", "我的队伍",
         "临时队伍", "攻打", "突围", "民心", "关闭", "出征", "加成",
         "免费", "驻守", "组队", "队伍", "战力", "兵士",
+        "暂无", "没有", "无",
     }
 
     # 队伍状态关键词（OCR 读到但绝非队伍名的状态文本）
@@ -116,6 +118,8 @@ class ZhanGongEngine:
         self.wait_anim: float = p.get("wait_anim", 1.0)
         # 敌我兵力倍率阈值：敌方兵力 > 我方 * ratio 才视为值得打
         self.enemy_ratio: float = p.get("enemy_ratio", 2.0)
+        # 跳过耗时探测（直接按兵力评分排序开打，避免探测期间列表变化）
+        self.skip_probe: bool = p.get("skip_probe", False)
         # 距离耗时上限（s）：超过则认为太远，放弃
         self.max_cost_time: int = p.get("max_cost_time", 600)
         # 优先城市列表（用户配置，比对用）
@@ -126,11 +130,11 @@ class ZhanGongEngine:
         # 最大站点尝试数
         self.max_locations: int = p.get("max_locations", 50)
         # 列表滚动识别：最大滚动次数（防止无限滚动）
-        self.max_scrolls: int = p.get("max_scrolls", 15)
+        self.max_scrolls: int = p.get("max_scrolls", 20)
         # 列表滚动识别：连续多少次无新地点则停止
         self.scroll_idle_limit: int = p.get("scroll_idle_limit", 2)
         # 列表滚动每次上滑距离（px）
-        self.scroll_step: int = p.get("scroll_step", 300)
+        self.scroll_step: int = p.get("scroll_step", 180)
         # 每个地点最大攻打次数（防止重复攻打失控）
         self.max_attacks_per_loc: int = p.get("max_attacks_per_loc", 15)
         # 出战队伍名称（优先匹配；支持多个，逗号分隔）
@@ -139,8 +143,6 @@ class ZhanGongEngine:
         self.team_index: int = p.get("team_index", 1)
         # 勾选的可出战队伍名称列表（UI 勾选生成；非空时轮流使用这些队伍）
         self.team_names: list[str] = p.get("team_names", [])
-        # 是否自动补兵（兵力不足时自动点补兵再打）
-        self.auto_supply: bool = p.get("auto_supply", False)
         # 诊断报告
         self.report: dict = {
             "params": self._dump_params(),
@@ -151,6 +153,7 @@ class ZhanGongEngine:
             "started_at": "",
             "finished_at": "",
             "total_attacks": 0,
+            "defeat_count": 0,
         }
 
     def _dump_params(self) -> dict:
@@ -171,7 +174,6 @@ class ZhanGongEngine:
             "team_name": self.team_name,
             "team_index": self.team_index,
             "team_names": self.team_names,
-            "auto_supply": self.auto_supply,
         }
 
     # ---------------- 主流程 ----------------
@@ -205,11 +207,12 @@ class ZhanGongEngine:
             on_progress(f"筛选出 {len(ranked)} 个可攻打地点")
 
         # 2.5 预探测各地点耗时（距离），用耗时重新排序
-        # 若只有一个可攻打城市，默认直接在该城市刷战功，跳过耗时探测
-        if len(ranked) == 1:
+        # 若只有一个可攻打城市，或用户指定跳过探测，则直接打
+        if len(ranked) == 1 or self.skip_probe:
             if on_progress:
-                on_progress(f"仅一个可攻打城市（{ranked[0].name}），跳过探测直接攻打")
-            ranked = [ranked[0]]
+                reason = "仅一个可攻打城市" if len(ranked) == 1 else "已跳过耗时探测"
+                on_progress(f"{reason}，直接攻打")
+            ranked = ranked[:1]
         else:
             ranked = self._probe_cost_times(ranked, on_progress, should_stop)
             ranked = self._rank_locations(ranked, on_progress)
@@ -257,63 +260,69 @@ class ZhanGongEngine:
         self.report["total_attacks"] = attacks
         self.report["finished_at"] = datetime.now().isoformat(timespec="seconds")
         if on_progress:
-            on_progress(f"战功刷取结束：共攻打 {attacks} 次")
+            defeats = self.report.get("defeat_count", 0)
+            on_progress(
+                f"战功刷取结束：共攻打 {attacks} 次，战败 {defeats} 次")
         return self.report
 
     # ---------------- 导航 ----------------
 
     def _navigate_to_city_war(self, on_progress) -> bool:
         """从大地图进入情报面板并切换到城池战事。返回是否成功。"""
-        # 0. 先回到大地图确定状态（点空白处关掉可能存在的面板）
-        self._back_to_world_map(on_progress)
+        # 最多重试 2 次（OCR/模板都失败时，关面板重开再试）
+        for attempt in range(2):
+            # 0. 先回到大地图确定状态（点空白处关掉可能存在的面板）
+            self._back_to_world_map(on_progress)
 
-        # 1. 点击情报按钮（固定坐标优先，模板匹配兜底）
-        ok = self._click_template(
-            "zhan_gong_intel_btn.png",
-            threshold=0.6,
-            max_retries=3,
-            wait_after=1.5,
-            on_progress=on_progress,
-            desc="情报按钮",
-        )
-        if not ok:
-            # 模板没找到，用固定坐标点击情报按钮
-            ix, iy = self.INTEL_BTN_COORD
-            if on_progress:
-                on_progress(f"模板匹配失败，用固定坐标点情报按钮 ({ix},{iy})")
-            self.ctrl.click(ix, iy)
-            time.sleep(1.5)
-            ok = True
-        if not ok:
-            if on_progress:
-                on_progress("错误：未找到情报按钮")
-            return False
-
-        if on_progress:
-            on_progress("已点击情报按钮，等待面板展开...")
-
-        # 2. 切换到城池战事页签（左侧垂直页签）
-        #    OCR 优先（直接识别"城池战事"四个字点击，比模板匹配更可靠）
-        ok = self._click_text("城池战事", max_retries=3, wait_after=1.5)
-        if not ok:
-            if on_progress:
-                on_progress("OCR 未找到，尝试模板匹配城池战事页签...")
+            # 1. 点击情报按钮（固定坐标优先，模板匹配兜底）
             ok = self._click_template(
-                "zhan_gong_city_war_tab.png",
+                "zhan_gong_intel_btn.png",
                 threshold=0.6,
                 max_retries=3,
                 wait_after=1.5,
                 on_progress=on_progress,
-                desc="城池战事页签",
+                desc="情报按钮",
             )
-        if not ok:
+            if not ok:
+                # 模板没找到，用固定坐标点击情报按钮
+                ix, iy = self.INTEL_BTN_COORD
+                if on_progress:
+                    on_progress(f"模板匹配失败，用固定坐标点情报按钮 ({ix},{iy})")
+                self.ctrl.click(ix, iy)
+                time.sleep(1.5)
+
             if on_progress:
-                on_progress("错误：未找到城池战事页签")
-            return False
+                on_progress("已点击情报按钮，等待面板展开...")
+
+            # 2. 切换到城池战事页签（左侧垂直页签）
+            #    OCR 优先（直接识别"城池战事"四个字点击，比模板匹配更可靠）
+            ok = self._click_text("城池战事", max_retries=3, wait_after=1.5)
+            if not ok:
+                if on_progress:
+                    on_progress("OCR 未找到，尝试模板匹配城池战事页签...")
+                ok = self._click_template(
+                    "zhan_gong_city_war_tab.png",
+                    threshold=0.6,
+                    max_retries=3,
+                    wait_after=1.5,
+                    on_progress=on_progress,
+                    desc="城池战事页签",
+                )
+
+            if ok:
+                if on_progress:
+                    on_progress("已切换到城池战事页面")
+                return True
+
+            # 失败了，关面板重试
+            if on_progress:
+                on_progress(f"第 {attempt+1} 次未找到城池战事页签，关面板重试...")
+            self._back_to_world_map(None)
+            time.sleep(1.0)
 
         if on_progress:
-            on_progress("已切换到城池战事页面")
-        return True
+            on_progress("错误：未找到城池战事页签")
+        return False
 
     def _click_template(self, template: str, threshold: float = 0.7,
                         max_retries: int = 3, wait_after: float = 1.0,
@@ -444,6 +453,13 @@ class ZhanGongEngine:
         """
         seen: dict[str, BattleLocation] = {}
         idle = 0
+        prev_screen_names: set[str] = set()
+
+        # 先滚到列表顶部，确保从头开始读
+        self._scroll_to_top()
+        if on_progress:
+            on_progress("已滚动到列表顶部，开始读取...")
+
         for scroll_no in range(self.max_scrolls + 1):
             if should_stop and should_stop():
                 break
@@ -453,6 +469,16 @@ class ZhanGongEngine:
                 logger.warning("滚动列表 OCR 失败: %s", e)
                 break
             screen_locs = self._parse_locations_screen(results)
+            screen_names = {loc.name for loc in screen_locs}
+
+            # 本屏和上一屏完全一样 → 已到底部，停止
+            if screen_names and screen_names == prev_screen_names:
+                if on_progress:
+                    on_progress(
+                        f"滚动 {scroll_no}: 内容与上一屏相同，已到底部，停止滚动")
+                break
+            prev_screen_names = screen_names
+
             new_found = 0
             for loc in screen_locs:
                 key = loc.name
@@ -477,31 +503,39 @@ class ZhanGongEngine:
     def _scroll_list_down(self) -> None:
         """向上滑动列表（内容向下滚动，露出下方更多城市）。
 
-        在列表区域（list_roi 内）从上往下滑，让列表内容上移显示更多后续项。
+        手机列表：手指从下往上滑（y 大→y 小），列表内容才向下滚动露出后续项。
+        用 scroll_step 控制滚动距离（约 2/3 屏高），避免跳太多或太少。
         滚动后等待动画稳定，避免 OCR 读到模糊/错位内容。
         """
         x, y, w, h = self.list_roi
         xc = x + w // 2
         step = self.scroll_step
-        # 从列表中部偏上滑到偏下，内容向上滚动
-        self.ctrl.swipe(xc, y + h // 2 - step // 2,
-                        xc, y + h // 2 + step // 2,
-                        duration_ms=500)
-        # 等待滚动动画稳定后再 OCR（比 wait_anim 更久）
-        time.sleep(max(self.wait_anim, 1.5))
+        # 起点在列表偏下方，终点在列表偏上方，距离 = step
+        start_y = y + h // 2 + step // 2
+        end_y = y + h // 2 - step // 2
+        # 限制不超出列表范围
+        start_y = min(start_y, y + h - 30)
+        end_y = max(end_y, y + 30)
+        self.ctrl.swipe(xc, start_y, xc, end_y, duration_ms=500)
+        # 等待滚动动画稳定后再 OCR
+        time.sleep(max(self.wait_anim, 1.2))
 
     def _scroll_to_top(self) -> None:
-        """反复下滚（内容回到顶部）直到列表顶部不再变化。
+        """反复下拉（内容回到顶部）直到列表回到顶部。
 
-        保守做法：多次向下滑动，让列表回到顶部。
+        手机列表：手指从上往下滑（y 小→y 大），列表内容向上滚动回到顶部。
+        用连续多次大跨度下滑确保回到顶部，最后等动画稳定。
         """
         x, y, w, h = self.list_roi
         xc = x + w // 2
-        for _ in range(self.max_scrolls):
-            self.ctrl.swipe(xc, y + h // 2 + 100,
-                            xc, y + h // 2 - 100,
-                            duration_ms=400)
-            time.sleep(0.6)
+        # 从接近顶部滑到底部附近，每次滑 h-60，确保最大限度滚动
+        top_y = y + 40
+        bottom_y = y + h - 40
+        for _ in range(6):
+            self.ctrl.swipe(xc, top_y, xc, bottom_y, duration_ms=500)
+            time.sleep(0.5)
+        # 等动画完全稳定
+        time.sleep(1.0)
 
     def _find_column_edges(self, rows: list[list[dict]]) -> list[int]:
         """从表头行确定列边界（每列的 x 中心分隔线）。
@@ -934,7 +968,11 @@ class ZhanGongEngine:
                 on_progress(f"[定位] 无法回到城池战事页面，放弃『{name}』")
             return False
 
+        # 先滚到列表顶部，确保从头开始找
+        self._scroll_to_top()
+
         # 2. 从顶部开始查找：先读当前屏，找不到则向下滚动继续找
+        prev_screen_names: set[str] = set()
         for scroll_idx in range(self.max_scrolls + 1):
             if should_stop and should_stop():
                 return False
@@ -959,8 +997,17 @@ class ZhanGongEngine:
                     return False
                 return True
 
-            # 本屏未找到，向下滚动继续找
+            # 本屏未找到
             names = [lo.name for lo in locs]
+            screen_set = set(names)
+
+            # 内容和上一屏一样 → 已到底部，不用再找了
+            if screen_set == prev_screen_names:
+                if on_progress:
+                    on_progress(f"[定位] 已到列表底部仍未找到『{name}』，放弃")
+                return False
+            prev_screen_names = screen_set
+
             if on_progress:
                 on_progress(
                     f"[定位] 滚动{scroll_idx}未找到『{name}』，有: {names}，"
@@ -1135,27 +1182,118 @@ class ZhanGongEngine:
             else:
                 target_teams = [target]
 
-            # 6. 逐个勾选队伍攻打（每个队伍打一轮）
-            attacked_any = False
+            # 6. 第一轮：批量把所有可战队伍各派出一队。
+            #    面板保持打开，只需一次导航、一次补兵、一次定位，逐个点攻打按钮，
+            #    靠 UNAVAILABLE toast 拦截不可攻打的队伍；全部点完后
+            #    关面板回大地图统一验证出征情况，再一起等待所有战斗结束。
+            #    后续轮次仍走 _attack_with_team（从第 2 轮继续）。
+            if should_stop and should_stop():
+                return False
+
+            # 6.1 一键补兵（给所有队伍补满）
+            if on_progress:
+                on_progress(f"【批量第一轮】一键补兵（{len(target_teams)} 队）")
+            clicked = self._click_supply_all_btn(on_progress)
+            if clicked:
+                if self._sleep_interruptible(1.5, should_stop):
+                    return False
+                if self._has_no_food():
+                    if on_progress:
+                        on_progress("补兵失败（无粮食），本轮批量派出放弃")
+                    self._back_to_world_map(on_progress)
+                    return False
+
+            # 6.2 面板保持打开，逐个点攻打按钮
+            dispatched: list[dict] = []
             for t_idx, tgt in enumerate(target_teams, 1):
                 if should_stop and should_stop():
                     break
-                # 轮前：清理可能已弹出的战败弹窗（上一队派出后战斗可能已失败）
+                if on_progress:
+                    on_progress(
+                        f"【批量第一轮】派出 {t_idx}/{len(target_teams)}："
+                        f"{tgt['name']}")
+                self._click_attack_btn_on_team(tgt, on_progress)
+                if self._sleep_interruptible(3.0, should_stop):
+                    break
+                # 点完攻打检测不可攻打 toast，有则跳过该队
+                if self._has_toast(
+                    self.UNAVAILABLE_KEYWORDS,
+                    template="zhan_gong_unavailable.png",
+                ):
+                    if on_progress:
+                        on_progress(
+                            f"【批量第一轮】攻打失败（无法攻打提示），"
+                            f"跳过：{tgt['name']}")
+                    continue
+                # 无 toast，视为点上了攻打（可能已直接出征），记录待验证
+                dispatched.append(tgt)
+
+            if not dispatched:
+                if on_progress:
+                    on_progress(f"无队伍成功派出，放弃：{loc.name}")
+                self._back_to_world_map(on_progress)
+                return False
+
+            # 6.3 全部点完：关面板回大地图，通过 compact 列表验证出征
+            self._back_to_world_map(on_progress)
+            if self._sleep_interruptible(3.0, should_stop):
+                return False
+            actually_marching: list[dict] = []
+            for tgt in dispatched:
+                if should_stop and should_stop():
+                    break
+                team_name = tgt.get("name", "?")
+                if self._verify_team_marching(team_name):
+                    actually_marching.append(tgt)
+                    if on_progress:
+                        on_progress(f"【批量第一轮】派兵成功：{team_name}")
+                else:
+                    # compact 列表 OCR 可能漏判，点了攻打就按已派出算
+                    actually_marching.append(tgt)
+                    if on_progress:
+                        on_progress(
+                            f"【批量第一轮】派兵验证未通过"
+                            f"（可能OCR漏判/已派出）：{team_name}")
+
+            if not actually_marching:
+                if on_progress:
+                    on_progress(
+                        f"【批量第一轮】没有队伍验证出征，放弃：{loc.name}")
+                return False
+
+            attacked_any = True
+            loc.skip_reason = ""
+
+            # 7. 等待所有批量派出的队伍战斗结束（多队伍同时等待）
+            if on_progress:
+                on_progress(
+                    f"【批量第一轮】等待 {len(actually_marching)} 队战斗结束...")
+            stopped = self._wait_battle_return_multi(
+                loc, actually_marching, on_progress, should_stop)
+            if stopped:
+                return attacked_any
+
+            # 8. 后续轮次：保持原有单队伍多轮循环逻辑。
+            #    每队第 1 轮已由上方批量派出，故从第 2 轮继续。
+            for t_idx, tgt in enumerate(target_teams, 1):
+                if should_stop and should_stop():
+                    break
+                # 轮前清理可能已弹出的战败弹窗（上一队后续轮次战斗可能已失败）
                 if self._has_result_popup():
                     self._dismiss_result()
                     if on_progress:
                         on_progress("轮前检测到战败弹窗，已关闭")
                 if on_progress:
-                    on_progress(f"【队伍 {t_idx}/{len(target_teams)}】攻打 {tgt['name']}")
+                    on_progress(
+                        f"【队伍 {t_idx}/{len(target_teams)}】攻打 {tgt['name']}")
                 ok = self._attack_with_team(
-                    loc, tgt, on_progress, should_stop)
+                    loc, tgt, on_progress, should_stop,
+                    start_round=2)
                 if ok:
                     attacked_any = True
                 if should_stop and should_stop():
                     break
 
-            if attacked_any:
-                loc.skip_reason = ""
             return attacked_any
 
         except Exception as e:  # noqa: BLE001
@@ -1169,112 +1307,298 @@ class ZhanGongEngine:
         target: dict,
         on_progress=None,
         should_stop=None,
+        start_round: int = 1,
     ) -> bool:
-        """用单个队伍攻打一个地点（补兵/重伤/攻打循环）。
+        """用单个队伍循环攻打一个地点。
 
-        流程：补兵 → 点攻打 → 确认出征 → 等待派兵动画完成 → 队伍出征中 → 结束该队
-        （不需要等战斗结果，行军+战斗时间太长，派兵出去就算完成一轮）
+        每轮流程：
+        1. 重新导航到城池战事→定位城市→点攻城→打开队伍面板
+        2. 解析队伍面板，找到目标队伍
+        3. 出征中（非本次启动）→ 跳过
+        4. 重伤 → 关面板回大地图等恢复 → 下一轮
+        5. 可攻打 → 补兵 → 点攻打 → 关面板回大地图 → 等战斗结束 → 下一轮
+
+        说明：攻打面板内的预计时间是静态的，不会实时更新。
+        派兵后必须回到大地图，通过右侧常驻队伍列表（compact）检测真实状态。
+
+        start_round：从第几轮开始攻打。默认 1（独立调用走完整多轮循环）。
+        批量第一轮派出后，后续轮次从 start_round=2 继续，避免重复派第一队。
         """
         attacked_any = False
-        for round_no in range(1, self.max_attacks_per_loc + 1):
+        defeat_count = 0
+        team_name = target.get("name", "?")
+        team_index = target.get("index") or 0
+
+        for round_no in range(start_round, self.max_attacks_per_loc + 1):
             if should_stop and should_stop():
                 break
 
-            # 每轮前：清理可能已弹出的战败弹窗（上一轮派兵后战斗可能已失败）
+            # 0. 轮前清理战败弹窗
             if self._has_result_popup():
                 self._dismiss_result()
+                defeat_count += 1
                 if on_progress:
-                    on_progress(f"检测到战败弹窗，已关闭（第{round_no}轮前）")
+                    on_progress(
+                        f"【第{round_no}轮】战斗失败（第{defeat_count}次），"
+                        f"已关闭战败弹窗")
+                if self._sleep_interruptible(2.0, should_stop):
+                    break
 
-            # 重新解析队伍面板，拿最新状态
+            # 1. 重新导航：从大地图→情报→城池战事→定位城市→点攻城
+            ok = self._open_attack_panel_for_city(
+                loc, on_progress, should_stop)
+            if not ok:
+                if on_progress:
+                    on_progress(
+                        f"【第{round_no}轮】打开攻打面板失败，结束：{loc.name}")
+                break
+
+            # 2. 解析队伍面板
             teams = self._parse_team_panel(on_progress)
             if not teams:
-                on_progress(f"队伍面板消失，结束攻打：{loc.name}")
-                break
-            target = self._find_team_by_name(teams, target.get("name"), target)
-            if not target:
-                on_progress(f"未找到目标队伍，结束攻打：{loc.name}")
-                break
-
-            # 队伍已出征中 / 行军中 = 上一轮已派兵成功，本轮不能再打
-            if target["status"] and any(
-                kw in target["status"]
-                for kw in ("出征中", "行军中")
-            ):
-                if attacked_any:
+                if on_progress:
                     on_progress(
-                        f"队伍已出征（{target['status']}），结束攻打：{loc.name}")
+                        f"【第{round_no}轮】未读取到队伍面板，结束：{loc.name}")
+                self._back_to_world_map(on_progress)
                 break
 
-            # 重伤：读取恢复倒计时并等待
-            if not target["attackable"]:
-                wait = self._parse_injury_wait(target)
-                if wait > 0:
+            target = self._find_team_by_name(teams, team_name)
+            if not target and team_index and team_index <= len(teams):
+                target = teams[team_index - 1]
+            if not target:
+                if on_progress:
+                    on_progress(
+                        f"【第{round_no}轮】未找到目标队伍『{team_name}』，"
+                        f"结束：{loc.name}")
+                self._back_to_world_map(on_progress)
+                break
+            team_name = target.get("name", team_name)
+            if not target.get("index"):
+                target["index"] = team_index
+
+            # 3. 队伍出征中：如果是首次检测且之前没派兵，说明是初始出征中，跳过
+            status = target.get("status", "") or ""
+            is_marching = any(
+                kw in status for kw in ("出征中", "行军中")
+            )
+            if is_marching:
+                if not attacked_any:
                     if on_progress:
                         on_progress(
-                            f"队伍重伤，等待 {wait} 秒恢复后再攻（第{round_no}轮）")
-                    if self._sleep_interruptible(wait, should_stop):
-                        break
-                    continue
-                on_progress(f"队伍不可出战（{target['status']}），结束攻打：{loc.name}")
-                break
-
-            # 补兵（若开启自动补兵，且血条为灰色=无兵时）
-            if self.auto_supply:
-                if target.get("need_supply"):
-                    if on_progress:
-                        on_progress(f"补兵：{target['name']}（第{round_no}轮）")
-                    clicked = self._click_supply_btn(target)
-                    if not clicked:
-                        if on_progress:
-                            on_progress("未找到补兵按钮，跳过补兵直接攻打")
-                    else:
-                        if self._sleep_interruptible(1.5, should_stop):
-                            break
-                        if self._has_no_food():
-                            on_progress(f"补兵失败（无粮食），结束攻打：{loc.name}")
-                            break
-                else:
-                    if on_progress:
-                        on_progress(f"队伍兵力充足，跳过补兵（第{round_no}轮）")
-
-            # 点「攻打」（直接出征，无确认弹窗；按钮可能变「行军」）
-            if on_progress:
-                on_progress(f"点『攻打』出征：{target['name']}（第{round_no}轮）")
-            self._click_attack_btn_on_team(target, on_progress)
-            if self._sleep_interruptible(2.0, should_stop):
-                break
-
-            # 点攻打后检测短促 toast：血量不足/无法攻打等 → 本轮攻打失败
-            if self._has_toast(
-                self.UNAVAILABLE_KEYWORDS,
-                template="zhan_gong_unavailable.png",
-            ):
+                            f"队伍已出征（{status}），"
+                            f"非本次启动，跳过：{team_name}")
+                    self._back_to_world_map(on_progress)
+                    break
+                # 自己派出去的，继续等
                 if on_progress:
-                    on_progress(f"攻打失败（血量不足/无法攻打提示），放弃：{loc.name}")
-                break
+                    on_progress(
+                        f"【第{round_no}轮】队伍出征中（{status}），等待返回")
+
+            # 4. 重伤 / 兵力不足：先点一键补兵再打，不傻等恢复
+            #    补兵后重伤/缺兵都会被补满，直接进入攻打流程。
+            #    只有真的点不了攻打（如无粮）才由后续 toast 检测兜底。
+            if not target.get("attackable", True):
+                if on_progress:
+                    on_progress(
+                        f"【第{round_no}轮】队伍重伤/不可战，"
+                        f"先补兵：{team_name}")
+                clicked = self._click_supply_all_btn(on_progress)
+                if clicked:
+                    if self._sleep_interruptible(2.0, should_stop):
+                        break
+                    if self._has_no_food():
+                        if on_progress:
+                            on_progress(
+                                f"补兵失败（无粮食），结束攻打：{team_name}")
+                        self._back_to_world_map(on_progress)
+                        break
+                    # 补兵后重新解析一次，确认状态更新
+                    teams = self._parse_team_panel(on_progress)
+                    target = self._find_team_by_name(teams, team_name)
+                    if not target and team_index:
+                        teams2 = self._parse_team_panel(on_progress)
+                        if team_index <= len(teams2):
+                            target = teams2[team_index - 1]
+                    if not target:
+                        if on_progress:
+                            on_progress(
+                                f"【第{round_no}轮】补兵后找不到队伍，"
+                                f"结束：{team_name}")
+                        self._back_to_world_map(on_progress)
+                        break
+                    team_name = target.get("name", team_name)
+
+            # 5. 补兵：每轮战斗前点面板底部『一键补兵』大按钮（给全部队伍补兵）。
+            # 兵满时点了也无副作用，无需通过血条颜色验证。
+            # 无粮情况由 _has_no_food 检测兜底，真没兵则点攻打时 toast 也会拦截。
+            if on_progress:
+                on_progress(f"【第{round_no}轮】一键补兵：{team_name}")
+            clicked = self._click_supply_all_btn(on_progress)
+            if not clicked:
+                if on_progress:
+                    on_progress("未找到一键补兵按钮，跳过补兵直接攻打")
+            else:
+                if self._sleep_interruptible(1.5, should_stop):
+                    break
+                if self._has_no_food():
+                    if on_progress:
+                        on_progress(
+                            f"补兵失败（无粮食），结束攻打：{team_name}")
+                    self._back_to_world_map(on_progress)
+                    break
+
+            # 6. 点「攻打」出征 + 验证（用大地图 compact 列表确认）
+            if on_progress:
+                on_progress(f"【第{round_no}轮】点『攻打』出征：{team_name}")
+            attack_ok = False
+            for retry in range(2):
+                if should_stop and should_stop():
+                    break
+                if on_progress and retry > 0:
+                    on_progress(
+                        f"【第{round_no}轮】攻打重试 {retry}/2：{team_name}")
+                self._click_attack_btn_on_team(target, on_progress)
+                if self._sleep_interruptible(3.0, should_stop):
+                    break
+
+                if self._has_toast(
+                    self.UNAVAILABLE_KEYWORDS,
+                    template="zhan_gong_unavailable.png",
+                ):
+                    if on_progress:
+                        on_progress(
+                            f"攻打失败（血量不足/无法攻打提示），"
+                            f"放弃：{team_name}")
+                    self._back_to_world_map(on_progress)
+                    return attacked_any
+
+                # 关面板回大地图，验证是否真的出征
+                self._back_to_world_map(on_progress)
+                if self._sleep_interruptible(3.0, should_stop):
+                    break
+
+                if self._verify_team_marching(team_name):
+                    attack_ok = True
+                    if on_progress:
+                        on_progress(f"【第{round_no}轮】派兵成功，队伍已出征")
+                    break
+
+                # 没出征，可能是没兵了（队伍位置因战力排序变化
+                # 导致补兵没命中正确队伍）。
+                # 重新打开面板，先一键补兵再重试攻打。
+                if on_progress:
+                    on_progress(
+                        f"【第{round_no}轮】派兵验证失败，"
+                        f"重新打开面板并一键补兵")
+                ok = self._open_attack_panel_for_city(
+                    loc, on_progress, should_stop)
+                if not ok:
+                    break
+                self._click_supply_all_btn(on_progress)
+                if self._sleep_interruptible(2.0, should_stop):
+                    break
+                teams = self._parse_team_panel(on_progress)
+                target = self._find_team_by_name(teams, team_name)
+                if not target:
+                    break
+
+            if not attack_ok:
+                # 验证失败不代表没派出 —— compact 列表 OCR 可能漏判。
+                # 既然已经点了攻打按钮，假设派兵成功，进入等待阶段。
+                # 真的没派出的话，等待阶段会超时结束，不会无限卡。
+                if on_progress:
+                    on_progress(
+                        f"【第{round_no}轮】派兵验证未通过（已重试2次），"
+                        f"仍按已派出进入等待：{team_name}")
+                attack_ok = True
 
             attacked_any = True
 
-            # 点攻打派兵成功后，立即结束本轮，不等战斗结束
-            # （用户确认：不等战斗结束立即派下一队，快速刷战功）
-            # 战斗结果（战败弹窗/重伤）由下一轮 _parse_team_panel 读取状态处理
-            break
+            # 7. 大地图等待战斗结束
+            if on_progress:
+                on_progress(f"【第{round_no}轮】等待战斗结果...")
+            stopped, final_status = self._wait_battle_return(
+                loc, target, on_progress, should_stop)
+            if stopped:
+                break
+
+        # 保存战败统计
+        if defeat_count > 0:
+            self.report["defeat_count"] = (
+                self.report.get("defeat_count", 0) + defeat_count)
 
         return attacked_any
 
+    def _open_attack_panel_for_city(
+        self,
+        loc: "BattleLocation",
+        on_progress=None,
+        should_stop=None,
+    ) -> bool:
+        """从大地图导航到城池战事，定位城市，点攻城打开攻打面板。
+
+        返回是否成功打开面板（面板已打开即可，不校验内容）。
+        """
+        # 从大地图进入情报→城池战事
+        if not self._navigate_to_city_war(on_progress):
+            return False
+        # 定位城市
+        if not self._click_city_by_name(loc.name, on_progress):
+            return False
+        if self._sleep_interruptible(1.0, should_stop):
+            return False
+        # 点攻城打开队伍面板
+        if not self._click_city_action(on_progress):
+            return False
+        if self._sleep_interruptible(1.5, should_stop):
+            return False
+        return True
+
+    def _verify_team_marching(self, team_name: str) -> bool:
+        """在大地图上通过 compact 队伍列表验证队伍是否出征中。"""
+        try:
+            teams = self._parse_team_panel(compact=True)
+        except Exception:  # noqa: BLE001
+            return False
+        t = self._find_team_by_name(teams, team_name)
+        if not t:
+            return False
+        status = t.get("status", "") or t.get("name", "")
+        return any(
+            kw in status for kw in
+            ("出征中", "行军中", "前往", "抵达", "●", "剩余", "战斗中")
+        )
+
     def _find_team_by_name(self, teams: list[dict], name: str,
                            fallback: Optional[dict] = None) -> Optional[dict]:
-        """按名称在队伍面板中查找队伍。找不到返回 fallback。"""
+        """按名称在队伍面板中查找队伍。找不到返回 fallback。
+
+        匹配优先级：完全相等 > 包含 > 2字以上共同汉字模糊匹配。
+        """
         if not name:
             return fallback
+        name_chars = set(c for c in name if '\u4e00' <= c <= '\u9fff')
+        # 1. 完全相等
         for t in teams:
-            if t.get("name") == name or name in t.get("name", ""):
+            if t.get("name") == name:
                 return t
-        # 模糊匹配
+        # 2. 包含
         for t in teams:
-            if any(c in t.get("name", "") for c in name if '\u4e00' <= c <= '\u9fff'):
+            tname = t.get("name", "")
+            if name in tname or tname in name:
                 return t
+        # 3. 模糊匹配：至少 2 个共同汉字
+        if len(name_chars) >= 2:
+            best_t, best_count = None, 0
+            for t in teams:
+                tname = t.get("name", "")
+                t_chars = set(c for c in tname if '\u4e00' <= c <= '\u9fff')
+                common = len(name_chars & t_chars)
+                if common >= 2 and common > best_count:
+                    best_t = t
+                    best_count = common
+            if best_t:
+                return best_t
         return fallback
 
     def _parse_injury_wait(self, target: dict) -> int:
@@ -1343,9 +1667,15 @@ class ZhanGongEngine:
 
     # 攻打面板中补兵/攻打按钮相对卡片中心的 x 偏移（横屏 1280x720）
     # 攻打/行军按钮在最右侧，补兵在其左边（图标按钮，OCR读不到文字时用固定坐标）
-    # 依据截图校准：攻打按钮中心 x≈1238，补兵按钮中心 x≈1170（1280x720）
-    ATTACK_BTN_DX_FROM_RIGHT = 22  # 卡片右边缘(1260)往左 22px ≈ 1238
-    SUPPLY_BTN_DX_FROM_RIGHT = 90  # 卡片右边缘往左 90px ≈ 1170
+    # 校准依据：运行日志模板命中攻打按钮实测 (1221,258)；vision 复读
+    # MuMu-20260814-025514-633.png 两按钮水平中心距约 70px、补兵按钮中心 x≈1127-1151。
+    # 旧值（攻打 1238 / 补兵 1170）整体偏右约 20-40px，导致补兵点击落到
+    # 按钮缝隙/攻打按钮上，补兵从未生效（日志：每轮补兵但兵力耗尽→暂无队伍）。
+    ATTACK_BTN_DX_FROM_RIGHT = 45  # 卡片右边缘(1260)往左 45px ≈ 1215
+    SUPPLY_BTN_DX_FROM_RIGHT = 120  # 卡片右边缘往左 120px ≈ 1140
+    # 面板底部『一键补兵』大按钮固定坐标（vision 校准 MuMu-20260814-025514-633.png：
+    # x≈615-880、y≈620-670 → 中心 (747,645)）
+    SUPPLY_ALL_BTN_COORD = (747, 645)
     # 攻打/补兵按钮相对卡片顶部的 y 偏移（vision 校准 MuMu-20260814-025514-633.png：
     # 第1卡顶部166→攻打按钮218，第2卡292→344，offset 一致为 52px）
     ATTACK_BTN_Y_OFFSET = 52
@@ -1353,19 +1683,61 @@ class ZhanGongEngine:
     PANEL_RIGHT_X = 1260
     # 大地图情报入口按钮固定坐标（依据日志：score=0.91/0.98 时点击 (103,572)）
     INTEL_BTN_COORD = (103, 572)
+    # 情报面板左侧「城池战事」页签固定坐标（OCR/模板都失败时兜底）
+    # 位置：左侧页签第2个，x≈100-120，y≈200-250（1280x720）
+    CITY_WAR_TAB_COORD = (108, 225)
     # 点空白处回到大地图时用的坐标（地图空白区域）
     WORLD_MAP_BLANK = (400, 400)
+    # 左上角返回按钮固定坐标（关闭面板/返回上一级）
+    BACK_BTN_COORD = (20, 20)
 
     def _back_to_world_map(self, on_progress=None) -> None:
-        """从任意状态（城池战事页/队伍面板/行动菜单）点空白处回到大地图。
+        """从任意面板/页面返回到大地图。
 
-        用户确认：点空白处即可回到大地图。多点几次确保所有层都关闭。
+        策略：先尝试点空白处关面板（城池战事/队伍面板等可以点空白关闭）。
+        如果点空白没效果（比如在英雄详情页），则点左上角返回键。
+        通过检测是否出现大地图特征（右侧队伍列表含"队"字）来确认。
         """
+        # 第一步：连续点空白 3 次，关掉可能存在的浮层
         for _ in range(3):
             self.ctrl.click(self.WORLD_MAP_BLANK[0], self.WORLD_MAP_BLANK[1])
             time.sleep(self.wait_anim)
+
+        # 第二步：检测是否在大地图（右侧队伍区域含"队"字）
+        if self._is_on_world_map():
+            if on_progress:
+                on_progress("已回到大地图")
+            return
+
+        # 第三步：点左上角返回，最多 5 次，直到回到大地图
+        for _ in range(5):
+            self.ctrl.click(self.BACK_BTN_COORD[0], self.BACK_BTN_COORD[1])
+            time.sleep(self.wait_anim + 0.3)
+            if self._is_on_world_map():
+                if on_progress:
+                    on_progress("已回到大地图")
+                return
+
+        # 最后兜底：再点几次空白
+        for _ in range(3):
+            self.ctrl.click(self.WORLD_MAP_BLANK[0], self.WORLD_MAP_BLANK[1])
+            time.sleep(self.wait_anim)
+
         if on_progress:
-            on_progress("已回到大地图")
+            on_progress("已回到大地图（兜底）")
+
+    def _is_on_world_map(self) -> bool:
+        """检测是否在大地图：右侧队伍区域含'队'字样。"""
+        try:
+            # 右侧队伍列表区域：x≈1080-1260, y≈200-500
+            results = self.ctrl.ocr((1080, 200, 180, 300))
+            for r in results:
+                text = (r.get("text") or "").strip()
+                if "队" in text and len(text) >= 2:
+                    return True
+        except Exception as e:  # noqa: BLE001
+            logger.debug("is_on_world_map OCR 失败: %s", e)
+        return False
 
     def _parse_team_panel(self, on_progress=None,
                           compact: bool = False) -> list[dict]:
@@ -1427,7 +1799,7 @@ class ZhanGongEngine:
                 team["name"] = f"第{idx}队重伤中"
 
         # 血条检测：有兵=绿色，无兵=灰色 → 需要补兵
-        self._mark_need_supply(teams)
+        self._mark_need_supply(teams, compact=compact)
         return teams
 
     def _group_into_cards(self, items: list[dict],
@@ -1450,12 +1822,21 @@ class ZhanGongEngine:
                 cards.append([it])
         return cards
 
-    def _mark_need_supply(self, teams: list[dict]) -> None:
+    def _mark_need_supply(self, teams: list[dict], compact: bool = False) -> None:
         """用屏色判断每支队伍血条颜色：绿=有兵，灰/暗=无兵需补兵。
 
-        横屏 1280x720 下，血条位于左侧头像底部（x≈600-660），
-        纵向约在卡片中心 row_y 上方 20px 附近（头像在卡片上半部分）。
+        攻城面板（compact=False）：血条位于每张卡片左侧武将头像底部，
+        横屏 1280x720 下头像 x≈615-675，血条纵向约在卡片顶部下方 85-105px
+        （vision 校准 MuMu-20260814-025514-633.png：第1卡顶部152→血条≈237-247）。
+        旧逻辑用 row_y（OCR条目中心均值，偏高约 35px）取样，命中头像而非血条，
+        导致恒判"需补兵"。
+
+        compact=True（大地图列表）：布局不同且不参与补兵判定，跳过检测。
         """
+        if compact:
+            for team in teams:
+                team["need_supply"] = False
+            return
         if not teams:
             return
         try:
@@ -1465,17 +1846,15 @@ class ZhanGongEngine:
             return
         w, h = img.size
         for team in teams:
-            ry = team.get("row_y", 0)
-            if ry <= 0:
+            top = team.get("card_top", 0) or team.get("row_y", 0)
+            if top <= 0:
                 continue
-            # 血条在头像底部，头像位于卡片上半部分
-            # 粗略估计：头像中心约在 row_y - 15，血条在头像底部 = row_y - 5 ~ row_y + 8
-            bar_y0 = max(0, ry - 10)
-            bar_y1 = min(h - 1, ry + 15)
+            # 头像底部血条：x≈600-680，y≈card_top+75..card_top+105
+            bar_y0 = max(0, top + 75)
+            bar_y1 = min(h - 1, top + 105)
             green = False
             for y in range(bar_y0, bar_y1 + 1):
-                # 头像底部血条 x 范围约 605-655
-                for x in range(605, 656, 2):
+                for x in range(600, 681, 2):
                     if x >= w:
                         continue
                     try:
@@ -1652,6 +2031,7 @@ class ZhanGongEngine:
             "attack_btn": None,
             "supply_btn": None,
             "row_y": card_y,
+            "card_top": card_top,
             "need_supply": False,
             "is_injured": is_injured,
         }
@@ -1711,14 +2091,16 @@ class ZhanGongEngine:
         """在队伍列表里找到目标队伍。优先按名称，失败则按序号。"""
         # 按名称匹配
         if self.team_name:
-            for t in teams:
+            for idx, t in enumerate(teams, 1):
                 if self.team_name in t["name"] or t["name"] in self.team_name:
+                    t["index"] = idx
                     if on_progress:
                         on_progress(f"匹配队伍：{t['name']}")
                     return t
             # 尝试模糊匹配（包含部分文字）
-            for t in teams:
+            for idx, t in enumerate(teams, 1):
                 if any(c in t["name"] for c in self.team_name if '\u4e00' <= c <= '\u9fff'):
+                    t["index"] = idx
                     if on_progress:
                         on_progress(f"模糊匹配队伍：{t['name']}")
                     return t
@@ -1728,6 +2110,7 @@ class ZhanGongEngine:
         # 按序号
         if 1 <= self.team_index <= len(teams):
             t = teams[self.team_index - 1]
+            t["index"] = self.team_index
             if on_progress:
                 on_progress(f"选择第 {self.team_index} 队：{t['name']}")
             return t
@@ -1762,8 +2145,10 @@ class ZhanGongEngine:
                 on_progress(f"[行动菜单] 菜单OCR读到: {texts}")
             for r in results:
                 text = (r.get("text") or "").strip()
-                for kw in ("攻城", "行军", "攻打"):
-                    if kw in text:
+                # 只点攻城，跳过行军（己方城池）。
+                # OCR 敌我数字解析可能不准，以行动菜单上是否有「攻城」为准。
+                for kw in ("攻城", "攻打"):
+                    if kw in text and "行军" not in text:
                         box = r.get("box", (0, 0, 0, 0))
                         cx = box[0] + box[2] // 2
                         cy = box[1] + box[3] // 2
@@ -1786,11 +2171,15 @@ class ZhanGongEngine:
         返回是否点击成功。
         """
         ry = team.get("row_y", 0)
+        btn_y = ry
+        if team.get("attack_btn"):
+            btn_y = team["attack_btn"][1]
         if on_progress:
-            on_progress(f"[攻打] 菜单已弹出，识别攻打/行军按钮（行y={ry}）...")
+            on_progress(f"[攻打] 菜单已弹出，识别攻打/行军按钮（行y={btn_y}）...")
 
-        # OCR 区域：覆盖卡片右侧按钮区（补兵+攻打），中心在行高
-        roi = (self.PANEL_RIGHT_X - 300, ry - 45, 320, 90)
+        # OCR 区域：覆盖卡片右侧按钮区（补兵+攻打），中心放在按钮行（btn_y）
+        # 旧逻辑以 ry（OCR条目中心均值）为锚，偏高约 35px，读不到按钮下方文字
+        roi = (self.PANEL_RIGHT_X - 300, btn_y - 40, 320, 100)
         if on_progress:
             on_progress(f"[攻打] OCR区域={roi}")
         try:
@@ -1839,11 +2228,42 @@ class ZhanGongEngine:
             on_progress(f"[攻打] 兜底点右侧 ({fx},{fy})")
         return True
 
-    def _click_supply_btn(self, team: dict) -> bool:
-        """点击补兵按钮。返回是否点击了。"""
+    def _click_supply_btn(self, team: dict, on_progress=None) -> bool:
+        """点击指定队伍的补兵按钮。返回是否点击了。
+
+        优先 OCR 在按钮行区域找『补兵』文字点击（图标下方有文字标签）；
+        找不到再用固定坐标点击补兵按钮位置。
+        """
+        ry = team.get("row_y", 0)
+        btn_y = ry
+        if team.get("supply_btn"):
+            btn_y = team["supply_btn"][1]
+        elif team.get("attack_btn"):
+            btn_y = team["attack_btn"][1]
+
+        # OCR 区域：覆盖该行按钮区（图标+下方文字），中心放在按钮行上
+        if btn_y > 0:
+            roi = (self.PANEL_RIGHT_X - 300, btn_y - 40, 320, 100)
+            try:
+                results = self.ctrl.ocr(roi=roi)
+                for r in results:
+                    text = (r.get("text") or "").strip()
+                    if "补兵" in text:
+                        box = r.get("box", (0, 0, 0, 0))
+                        cx = box[0] + box[2] // 2
+                        cy = box[1] + box[3] // 2
+                        self.ctrl.click(cx, cy)
+                        if on_progress:
+                            on_progress(f"[补兵] OCR点击『补兵』({cx},{cy})")
+                        return True
+            except Exception as e:  # noqa: BLE001
+                logger.debug("补兵按钮 OCR 失败: %s", e)
+
         if team.get("supply_btn"):
             x, y = team["supply_btn"]
             self.ctrl.click(x, y)
+            if on_progress:
+                on_progress(f"[补兵] 固定坐标点补兵 ({x},{y})")
             return True
         # 兜底：攻打按钮左侧
         if team.get("attack_btn"):
@@ -1851,6 +2271,36 @@ class ZhanGongEngine:
             self.ctrl.click(ax - 80, ay)
             return True
         return False
+
+    def _click_supply_all_btn(self, on_progress=None) -> bool:
+        """点击队伍面板底部的『一键补兵』大按钮（给全部队伍补兵）。
+
+        OCR 在按钮区域找『一键补兵』文字优先；找不到用固定坐标兜底。
+        """
+        # OCR 区域：面板底部『一键补兵』『一键前往』两枚大按钮所在行
+        try:
+            roi = (600, 600, 680, 100)
+            results = self.ctrl.ocr(roi=roi)
+            for r in results:
+                text = (r.get("text") or "").strip()
+                if "一键补兵" in text:
+                    box = r.get("box", (0, 0, 0, 0))
+                    cx = box[0] + box[2] // 2
+                    cy = box[1] + box[3] // 2
+                    self.ctrl.click(cx, cy)
+                    if on_progress:
+                        on_progress(f"[补兵] OCR点击『一键补兵』({cx},{cy})")
+                    return True
+        except Exception as e:  # noqa: BLE001
+            logger.debug("一键补兵按钮 OCR 失败: %s", e)
+
+        # 固定坐标兜底（vision 校准 MuMu-20260814-025514-633.png：
+        # 『一键补兵』x≈615-880、y≈620-670 → 中心 (747,645)）
+        x, y = self.SUPPLY_ALL_BTN_COORD
+        self.ctrl.click(x, y)
+        if on_progress:
+            on_progress(f"[补兵] 固定坐标点『一键补兵』({x},{y})")
+        return True
 
     def _close_team_panel(self) -> None:
         """关闭右侧队伍面板（点一下地图空白区域或X）。"""
@@ -1959,6 +2409,174 @@ class ZhanGongEngine:
             time.sleep(1.0)
         if on_progress:
             on_progress("等待战斗结果超时，继续")
+        return False
+
+    def _wait_battle_return(
+        self,
+        loc: BattleLocation,
+        target: dict,
+        on_progress=None,
+        should_stop=None,
+    ) -> tuple[bool, str]:
+        """派兵后等待战斗结束并回城，期间检测并关闭战败弹窗。
+
+        通过大地图右侧常驻队伍列表（compact模式）轮询队伍状态，
+        因为攻打面板内的预计时间是静态的，不会实时更新。
+
+        返回 (stopped, status)：
+          - stopped=True 表示被停止请求中断
+          - status 为最终检测到的队伍状态字符串
+        """
+        team_name = target.get("name", "?")
+        cost = max(loc.cost_time, 60)
+        total_timeout = cost * 2 + 300
+        deadline = time.time() + total_timeout
+        poll_interval = 15
+
+        if on_progress:
+            on_progress(
+                f"等待战斗结束（预计最长 {total_timeout} 秒，"
+                f"行军 {cost}s + 战斗缓冲）")
+
+        # 确保在大地图（compact 队伍列表在大地图才实时更新）
+        self._back_to_world_map(on_progress)
+        if self._sleep_interruptible(2.0, should_stop):
+            return True, "?"
+
+        last_status = "出征中"
+        while time.time() < deadline:
+            if should_stop and should_stop():
+                return True, last_status
+
+            # 1. 优先检测战败弹窗
+            if self._has_result_popup():
+                self._dismiss_result()
+                if on_progress:
+                    on_progress("检测到战败弹窗，已关闭")
+                if self._sleep_interruptible(3.0, should_stop):
+                    return True, "战败"
+                continue
+
+            # 2. 用大地图常驻队伍列表（compact）检测状态
+            try:
+                teams = self._parse_team_panel(compact=True)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("等待战斗中队伍列表解析失败: %s", e)
+                teams = []
+
+            if teams:
+                t = self._find_team_by_name(teams, team_name, target)
+                if t:
+                    status = t.get("status", "") or t.get("name", "")
+                    # 出征中的关键词
+                    if any(kw in status for kw in
+                           ("出征中", "行军中", "前往", "抵达",
+                            "●", "剩余", "战斗中")):
+                        last_status = status
+                    else:
+                        # 不再是出征状态 → 战斗结束，队伍已回城/重伤
+                        if on_progress:
+                            on_progress(
+                                f"战斗结束，队伍『{team_name}』"
+                                f"状态：{status or '正常'}")
+                        return False, status
+
+            # 3. 继续等待
+            if self._sleep_interruptible(poll_interval, should_stop):
+                return True, last_status
+
+        if on_progress:
+            on_progress(
+                f"等待战斗结束超时（{total_timeout}s），"
+                f"队伍『{team_name}』状态：{last_status}")
+        return False, "超时"
+
+    def _wait_battle_return_multi(
+        self,
+        loc: BattleLocation,
+        targets: list[dict],
+        on_progress=None,
+        should_stop=None,
+    ) -> bool:
+        """批量派兵后，一起等待所有队伍的后续战斗结束并回城。
+
+        通过大地图右侧常驻队伍列表（compact）轮询各队伍状态，
+        与 _wait_battle_return 单队伍逻辑等价的批量版本：
+        任一战败弹窗都关闭；某队不再处于出征状态即视为该队战斗结束；
+        所有队伍都结束（或不在列表/超时）后返回。
+
+        返回 stopped：True 表示被停止请求中断。
+        """
+        if not targets:
+            return False
+        cost = max(loc.cost_time, 60)
+        total_timeout = cost * 2 + 300
+        deadline = time.time() + total_timeout
+        poll_interval = 15
+
+        # 记录尚在等待的队伍名称；每队一旦结束就从 pending 中移除
+        pending = [t.get("name", "?") for t in targets]
+        if on_progress:
+            on_progress(
+                f"等待 {len(pending)} 支队伍战斗结束"
+                f"（预计最长 {total_timeout} 秒，行军 {cost}s + 战斗缓冲）")
+
+        while time.time() < deadline and pending:
+            if should_stop and should_stop():
+                return True
+
+            # 1. 战败弹窗：批量时任一队伍失败都会弹，关闭即可
+            if self._has_result_popup():
+                self._dismiss_result()
+                if on_progress:
+                    on_progress("检测到战败弹窗，已关闭")
+                if self._sleep_interruptible(3.0, should_stop):
+                    return True
+                continue
+
+            # 2. 用大地图常驻队伍列表（compact）检测各队状态
+            try:
+                teams = self._parse_team_panel(compact=True)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("等待战斗中队伍列表解析失败: %s", e)
+                teams = []
+
+            if teams:
+                done = []
+                for name in pending:
+                    t = self._find_team_by_name(teams, name)
+                    if not t:
+                        # 列表里找不到该队：可能已结束不在列表，视为完成
+                        done.append(name)
+                        continue
+                    status = t.get("status", "") or t.get("name", "")
+                    # 出征中的关键词
+                    if any(kw in status for kw in
+                           ("出征中", "行军中", "前往", "抵达",
+                            "●", "剩余", "战斗中")):
+                        continue
+                    # 不再是出征状态 → 该队战斗结束，队伍已回城/重伤
+                    done.append(name)
+                    if on_progress:
+                        on_progress(
+                            f"战斗结束，队伍『{name}』"
+                            f"状态：{status or '正常'}")
+                for name in done:
+                    if name in pending:
+                        pending.remove(name)
+                if not pending:
+                    if on_progress:
+                        on_progress("所有队伍战斗均已结束")
+                    return False
+
+            # 3. 继续等待
+            if self._sleep_interruptible(poll_interval, should_stop):
+                return True
+
+        if pending and on_progress:
+            on_progress(
+                f"等待战斗结束超时（{total_timeout}s），"
+                f"尚未结束的队伍：{pending}")
         return False
 
     def _has_result_popup(self) -> bool:

@@ -4,7 +4,9 @@ import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
+from app.core.config import app_root as _app_root
+
+LOG_DIR = _app_root() / "logs"
 
 
 def setup_logger(name: str = "sangui") -> logging.Logger:

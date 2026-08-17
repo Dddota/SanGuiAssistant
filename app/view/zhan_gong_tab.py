@@ -112,10 +112,6 @@ class ZhanGongTab(QWidget):
         self.team_scroll_layout.addWidget(self.team_hint)
         opt_layout.addWidget(self.team_scroll)
 
-        self.auto_supply_cb = CheckBox("自动补兵（兵力不足时自动补兵再打）")
-        self.auto_supply_cb.setChecked(True)
-        opt_layout.addWidget(self.auto_supply_cb)
-
         layout.addWidget(opt_card)
 
         # 状态卡片
@@ -203,7 +199,6 @@ class ZhanGongTab(QWidget):
                    if cb.isChecked()] if getattr(self, "_team_boxes", None) else []
         if checked:
             params["team_names"] = checked
-        params["auto_supply"] = self.auto_supply_cb.isChecked()
         return params
 
     def _on_read_teams(self) -> None:

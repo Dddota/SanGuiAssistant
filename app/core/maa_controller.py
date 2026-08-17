@@ -14,6 +14,8 @@ from maa.resource import Resource
 from maa.tasker import Tasker, TaskerEventSink
 from maa.toolkit import Toolkit
 
+from app.core.config import app_root as _app_root
+
 logger = logging.getLogger("sangui.controller")
 
 # 可选识别/输入方法组合（默认值即可，性能足够）
@@ -29,7 +31,7 @@ class MaaController:
         self._resource: Resource = Resource()
         self._tasker: Optional[Tasker] = None
         self._connected = False
-        self._user_path = Path(".").resolve() / "maa_user"
+        self._user_path = _app_root() / "maa_user"
 
     def init(self) -> None:
         """初始化 MAA 运行环境（仅需一次）。"""

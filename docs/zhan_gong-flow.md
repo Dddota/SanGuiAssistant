@@ -59,7 +59,8 @@
 | 最大耗时 | `max_cost_time` | `600` | 距离开限（秒），超过放弃 |
 | 出战队伍名称 | `team_name` | `""` | 优先按名称匹配，留空用序号 |
 | 出战队伍序号 | `team_index` | `1` | 名称匹配失败时用序号兜底 |
-| 自动补兵 | `auto_supply` | `True` | 兵力不足时自动补兵再打 |
+
+> 说明：补兵逻辑始终生效（检测到兵力不足即补兵，不再有 `auto_supply` 开关），补兵后验证血条是否恢复，未恢复则停止攻打。
 
 引擎内部参数（`__init__` 读取，Tab 未直接暴露）：`list_roi`、`team_panel_roi`、`wait_anim`、`max_attacks=20`、`max_locations=50`、`max_attacks_per_loc=15`。
 

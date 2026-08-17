@@ -152,19 +152,21 @@ class SinanEngine:
             if self._sleep(3.0, should_stop):
                 break
 
-            # 3.2 每次使用后先检查是否已不可用（出现即停，不关心数值）
-            if self._check_unavailable(on_progress):
-                self._log(on_progress, "司南已不可用，停止使用")
-                break
+            # 3.2 处理触发的宝箱/村庄事件（可多个）；处理完再判断是否不可用
+            handled = self._handle_event(on_progress, should_stop)
 
-            # 3.3 处理触发的宝箱/村庄事件（可多个）
-            if self._handle_event(on_progress, should_stop):
-                if self._sleep(self.wait_after, should_stop):
-                    break
-            else:
-                # 事件为空时，再确认一次是否已不可用
+            # 3.3 判断是否还有可用司南：只要面板上还能看到可用司南(sinan_first_item)，
+            #     就继续使用 —— 此刻即便 sinan_unavailable_percent 误命中（多为奖励
+            #     界面残留或面板上常驻的百分比显示）也不能据此停止；只有当司南面板上
+            #     已无可用司南时才判别"不可用"结束。
+            remaining = self._find("sinan_first_item.png", "可用司南(剩余)",
+                                   on_progress)
+            if not remaining:
                 if self._check_unavailable(on_progress):
                     self._log(on_progress, "司南已不可用，停止使用")
+                    break
+            if handled:
+                if self._sleep(self.wait_after, should_stop):
                     break
 
         # 4. 结束时再确认一次不可用状态
@@ -217,16 +219,40 @@ class SinanEngine:
                 if self._sleep(1.0, should_stop):
                     return handled
 
-        # 关闭奖励弹窗（固定坐标，点空白处）
+        # 关闭奖励弹窗：每点一下空白处后就确认是否已回到司南面板，
+        # 一旦看到 sinan_first_item 就停止点击，避免多余的盲点落到地图
+        # 上的城市而意外打开城市面板（导致司南面板被顶掉、提前结束）。
         if handled:
-            self._click(640, 500, "关闭奖励弹窗（空白处）", on_progress)
-            if self._sleep(self.wait_after, should_stop):
-                return handled
-            self._click(640, 300, "关闭奖励弹窗（第2下）", on_progress)
-            if self._sleep(1.5, should_stop):
-                return handled
+            self._close_reward_and_return(on_progress, should_stop)
 
         return handled
+
+    def _close_reward_and_return(self, on_progress, should_stop) -> None:
+        """关闭奖励弹窗并确保回到司南面板。
+
+        策略：依次点击固定空白坐标，每次点击后都识别 sinan_first_item。
+        - 一旦识别到（已回到司南面板）立即停止，不再多点；
+        - 若固定空点点到了城市造成了城市面板，则用 sinan_tab_btn 兜底返回。
+        """
+        for x, y in ((640, 500), (640, 300)):
+            self._click(x, y, "关闭奖励弹窗（点空白处）", on_progress)
+            if self._sleep(self.wait_after, should_stop):
+                return
+            # 已回到司南面板 → 结束关闭，避免多余的盲点
+            if self._find("sinan_first_item.png", "司南面板（已回到）",
+                          on_progress):
+                return
+            # 司南面板还没回来 → 继续点下一个空白坐标
+            if self._sleep(self.wait_after, should_stop):
+                return
+
+        # 两个空白坐标都点完仍未回到司南面板：很可能是点到了地图上的城市，
+        # 用司南页签按钮兜底返回司南面板
+        tab = self._find("sinan_tab_btn.png", "司南页签按钮（兜底返回）",
+                         on_progress)
+        if tab:
+            self._click(tab["cx"], tab["cy"], "返回司南面板", on_progress)
+            self._sleep(self.wait_after, should_stop)
 
     def _check_unavailable(self, on_progress) -> bool:
         """识别不可用百分比 → 标记结束。命中返回 True。"""

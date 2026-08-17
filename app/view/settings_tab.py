@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
@@ -49,13 +50,20 @@ class SettingsTab(QWidget):
         self.adb_path_edit = LineEdit()
         self.adb_path_edit.setPlaceholderText("adb.exe 完整路径")
 
+        self.detect_adb_btn = PushButton("自动检测")
+        self.detect_adb_btn.clicked.connect(self._on_detect_adb)
+        adb_row = QHBoxLayout()
+        adb_row.setSpacing(8)
+        adb_row.addWidget(self.adb_path_edit, 1)
+        adb_row.addWidget(self.detect_adb_btn)
+
         self.address_edit = LineEdit()
         self.address_edit.setPlaceholderText("127.0.0.1:16384")
 
         self.resource_edit = LineEdit()
         self.resource_edit.setPlaceholderText("app/assets")
 
-        form.addRow(BodyLabel("ADB 路径"), self.adb_path_edit)
+        form.addRow(BodyLabel("ADB 路径"), adb_row)
         form.addRow(BodyLabel("模拟器地址"), self.address_edit)
         form.addRow(BodyLabel("资源目录"), self.resource_edit)
         layout.addWidget(card)
@@ -120,3 +128,28 @@ class SettingsTab(QWidget):
         self.adb_path_edit.setText(config.ADB_PATH)
         self.address_edit.setText(config.ADB_ADDRESS)
         self.resource_edit.setText(config.RESOURCE_PATH)
+
+    def _on_detect_adb(self) -> None:
+        """自动探测本机 adb.exe 并填入路径框。"""
+        found = config.detect_adb()
+        self.adb_path_edit.setText(found)
+        if Path(found).is_file():
+            InfoBar.success(
+                title="已检测",
+                content=f"找到 adb：{found}",
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3000,
+                parent=self,
+            )
+        else:
+            InfoBar.warning(
+                title="未找到",
+                content="未探测到常见模拟器的 adb，请手动填写路径。",
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3000,
+                parent=self,
+            )
