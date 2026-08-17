@@ -257,7 +257,9 @@ class TaskRunner(QObject):
                 on_progress=_on_progress,
                 should_stop=_should_stop,
             )
-            self.sn_done.emit(True)
+            # 连续多次未收货宝箱判定失败 → 交给 BatchRunner 标记失败并进入下一个
+            ok = not bool(report.get("failed"))
+            self.sn_done.emit(ok)
         except Exception as e:  # noqa: BLE001
             logger.exception("Sinan failed")
             self.sn_progress.emit(f"司南任务异常：{e}")

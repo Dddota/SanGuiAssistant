@@ -143,6 +143,10 @@ class ZhanGongEngine:
         self.team_index: int = p.get("team_index", 1)
         # 勾选的可出战队伍名称列表（UI 勾选生成；非空时轮流使用这些队伍）
         self.team_names: list[str] = p.get("team_names", [])
+        # 是否粮食耗尽（补兵失败达到终点信号）
+        self._food_exhausted: bool = False
+        # 本会话内已尝试攻打但失败（非粮尽）的城市，避免下一轮无限重试同一座
+        self._blocked_cities: set[str] = set()
         # 诊断报告
         self.report: dict = {
             "params": self._dump_params(),
@@ -183,21 +187,81 @@ class ZhanGongEngine:
         on_progress: Optional[Callable[[str], None]] = None,
         should_stop: Optional[Callable[[], bool]] = None,
     ) -> dict:
-        """执行一次自动刷战功，返回统计报告。"""
+        """自动刷战功总入口。
+
+        在用户不点「停止」前持续刷：攻完最优城市后回到大地图，重新读列表、
+        打分，继续攻打下一个最优城市，直到以下任一停止条件满足：
+          - 粮食耗尽（补兵失败）
+          - 手动停止
+          - 没有可攻打的城市（全部攻打过或全部失败）
+          - 累计攻打次数达到 max_attacks 硬上限（默认20，兜底保证不会无限刷）
+        """
+        self._food_exhausted = False
+        self._blocked_cities.clear()
+        total_attacks = 0
         self.report["started_at"] = datetime.now().isoformat(timespec="seconds")
+        self.report.pop("errors", None)
+        self.report["errors"] = []
+        stop_reason = ""
+
+        pass_no = 0
+        while not self._food_exhausted:
+            if should_stop and should_stop():
+                stop_reason = "手动停止"
+                break
+            # 硬上限兜底：即使粮尽 OCR 漏检，也保证循环有界
+            if self.max_attacks > 0 and total_attacks >= self.max_attacks:
+                stop_reason = f"达到攻打次数上限（{self.max_attacks} 次）"
+                break
+            pass_no += 1
+            if on_progress:
+                on_progress(f"===== 第 {pass_no} 轮刷取（累计攻击 {total_attacks} 次）=====")
+            r = self._run_one_pass(on_progress, should_stop)
+            total_attacks += r.get("total_attacks", 0)
+            # 聚合本轮明细到报告（跨轮累积，供保存诊断用）
+            self.report["locations"].extend(r.get("locations", []))
+            self.report["attacks"].extend(r.get("attacks", []))
+            self.report["skipped"].extend(r.get("skipped", []))
+            self.report["errors"].extend(r.get("errors", []))
+            # 一轮中没有可攻打城市 → 无需继续
+            if r.get("no_target"):
+                stop_reason = "没有可攻打的城市"
+                break
+
+        self.report["total_attacks"] = total_attacks
+        self.report["stop_reason"] = stop_reason or "粮食耗尽"
+        self.report["finished_at"] = datetime.now().isoformat(timespec="seconds")
+        if on_progress:
+            defeats = self.report.get("defeat_count", 0)
+            on_progress(
+                f"战功刷取结束（{self.report['stop_reason']}）："
+                f"共攻打 {total_attacks} 次，战败 {defeats} 次")
+        return self.report
+
+    def _run_one_pass(
+        self,
+        on_progress: Optional[Callable[[str], None]] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> dict:
+        """执行一轮刷取（攻打当前最优城市一次）。返回该轮统计。"""
         attacks = 0
+        rpt = {
+            "locations": [],
+            "attacks": [],
+            "skipped": [],
+            "errors": [],
+            "total_attacks": 0,
+            "no_target": False,
+        }
 
         # 0. 导航：从大地图进入情报 → 城池战事
         if not self._navigate_to_city_war(on_progress):
-            self.report["errors"].append("进入城池战事页面失败")
-            self.report["finished_at"] = datetime.now().isoformat(timespec="seconds")
-            return self.report
+            rpt["errors"].append("进入城池战事页面失败")
+            return rpt
 
         # 1. 滚动读取当前战斗地点列表（识别所有城市）
         locations = self._read_all_locations(on_progress, should_stop)
-        self.report["locations"] = [
-            self._loc_to_report(lo) for lo in locations
-        ]
+        rpt["locations"] = [self._loc_to_report(lo) for lo in locations]
         if on_progress:
             on_progress(f"识别到 {len(locations)} 个战斗地点")
 
@@ -216,54 +280,39 @@ class ZhanGongEngine:
         else:
             ranked = self._probe_cost_times(ranked, on_progress, should_stop)
             ranked = self._rank_locations(ranked, on_progress)
-        ranked = [lo for lo in ranked]
         if on_progress:
             on_progress(f"按耗时排序后，待攻打地点：{len(ranked)} 个")
-        if on_progress:
-            on_progress(
-                f"[debug] stop_requested={bool(should_stop and should_stop())} "
-                f"ranked={[lo.name for lo in ranked]}")
 
         # 3. 只攻打评分最高的 1 个城市（用所有勾选队伍攻打，队伍都派出后结束）
         if not ranked:
             if on_progress:
                 on_progress("没有可攻打的城市，直接结束")
-            self.report["total_attacks"] = attacks
-            self.report["finished_at"] = datetime.now().isoformat(timespec="seconds")
-            return self.report
+            rpt["no_target"] = True
+            rpt["total_attacks"] = attacks
+            return rpt
 
         loc = ranked[0]
-        if on_progress:
-            on_progress(
-                f"[debug] stop_requested={bool(should_stop and should_stop())} "
-                f"ranked={[lo.name for lo in ranked[:1]]}")
         if should_stop and should_stop():
-            self.report["total_attacks"] = attacks
-            self.report["finished_at"] = datetime.now().isoformat(timespec="seconds")
-            return self.report
+            rpt["total_attacks"] = attacks
+            return rpt
 
         if on_progress:
             on_progress(
                 f"攻打最优城市：{loc.name}（我{loc.my_troops} vs 敌{loc.enemy_troops}）")
 
         ok = self._attack_one(loc, on_progress, should_stop)
-        if should_stop and should_stop():
-            self.report["total_attacks"] = attacks
-            self.report["finished_at"] = datetime.now().isoformat(timespec="seconds")
-            return self.report
-        self.report["attacks"].append(self._loc_to_report(loc, attacked=ok))
+        rpt["attacks"].append(self._loc_to_report(loc, attacked=ok))
         if ok:
             attacks += 1
         else:
-            self.report["skipped"].append(self._loc_to_report(loc))
-
-        self.report["total_attacks"] = attacks
-        self.report["finished_at"] = datetime.now().isoformat(timespec="seconds")
-        if on_progress:
-            defeats = self.report.get("defeat_count", 0)
-            on_progress(
-                f"战功刷取结束：共攻打 {attacks} 次，战败 {defeats} 次")
-        return self.report
+            rpt["skipped"].append(self._loc_to_report(loc))
+            # 本城市攻打失败（非粮尽）→ 本会话内不再重试它，改打别的城市
+            if not self._food_exhausted:
+                if on_progress:
+                    on_progress(f"本轮未能攻打 {loc.name}，后续轮次跳过该城")
+                self._blocked_cities.add(loc.name)
+        rpt["total_attacks"] = attacks
+        return rpt
 
     # ---------------- 导航 ----------------
 
@@ -1032,6 +1081,7 @@ class ZhanGongEngine:
         ranked = [
             lo for lo in locations
             if lo.attackable and lo.enemy_troops > lo.my_troops
+            and lo.name not in self._blocked_cities
         ]
         ranked.sort(key=lambda lo: lo.score, reverse=True)
 
@@ -1200,6 +1250,7 @@ class ZhanGongEngine:
                 if self._has_no_food():
                     if on_progress:
                         on_progress("补兵失败（无粮食），本轮批量派出放弃")
+                    self._food_exhausted = True
                     self._back_to_world_map(on_progress)
                     return False
 
@@ -1407,6 +1458,7 @@ class ZhanGongEngine:
                     if self._sleep_interruptible(2.0, should_stop):
                         break
                     if self._has_no_food():
+                        self._food_exhausted = True
                         if on_progress:
                             on_progress(
                                 f"补兵失败（无粮食），结束攻打：{team_name}")
@@ -1441,11 +1493,12 @@ class ZhanGongEngine:
                 if self._sleep_interruptible(1.5, should_stop):
                     break
                 if self._has_no_food():
+                    self._food_exhausted = True
                     if on_progress:
                         on_progress(
                             f"补兵失败（无粮食），结束攻打：{team_name}")
-                    self._back_to_world_map(on_progress)
-                    break
+                self._back_to_world_map(on_progress)
+                break
 
             # 6. 点「攻打」出征 + 验证（用大地图 compact 列表确认）
             if on_progress:

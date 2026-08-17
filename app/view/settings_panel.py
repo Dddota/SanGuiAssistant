@@ -52,10 +52,19 @@ class TaskSettingsPanel(CardWidget):
         self._stack.setCurrentWidget(self._panel_for(key))
 
     def build_params(self) -> dict:
-        """收集当前选中任务的参数。"""
-        if self._current_key == "zhan_gong":
+        """收集当前选中（显示）任务的参数。"""
+        return self.build_params_for(self._current_key)
+
+    def build_params_for(self, key: str) -> dict:
+        """按任务 key 收集参数，不依赖面板当前显示哪个任务。
+
+        所有子面板在 _init_ui 中无条件构建，控件始终存在，因此可对任意
+        勾选并运行的任务读取其参数，避免被勾选任务与中栏停留任务不一致时
+        参数整体落空（否则 priority_cities 会退化成引擎默认值）。
+        """
+        if key == "zhan_gong":
             return self._build_zhan_gong()
-        if self._current_key == "trade":
+        if key == "trade":
             return self._build_trade()
         return {}
 

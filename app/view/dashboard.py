@@ -160,10 +160,8 @@ class Dashboard(QWidget):
     # ---------------- 运行控制 ----------------
 
     def _params_fn(self, key: str) -> dict:
-        # 只有当前设置面板对应的任务才读取参数，其余用空参数
-        if getattr(self.settings, "_current_key", None) == key:
-            return self.settings.build_params()
-        return {}
+        # 按任务 key 读取参数，与中栏当前显示哪个任务无关
+        return self.settings.build_params_for(key)
 
     def _on_start(self) -> None:
         if not self._connected:

@@ -24,3 +24,11 @@ maa_user/
 # 系统文件
 .DS_Store
 Thumbs.db
+# PyInstaller 构建产物
+build/
+dist/
+
+# 诊断/测试脚本
+diag_*.py
+test_drive*.py
+test_drive*.log

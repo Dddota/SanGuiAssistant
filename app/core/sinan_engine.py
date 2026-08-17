@@ -27,21 +27,29 @@ class SinanEngine:
     THRESHOLD = 0.7
     # 无量最多使用次数（防失控）
     MAX_USES = 50
+    # 连续使用司南而未收货宝箱则判定任务失败
+    MAX_NO_CHEST = 3
 
     def __init__(self, ctrl, params: Optional[dict] = None):
         self.ctrl = ctrl
         p = params or {}
         self.threshold: float = p.get("threshold", self.THRESHOLD)
         self.max_uses: int = p.get("max_uses", self.MAX_USES)
+        self.max_no_chest: int = p.get("max_no_chest", self.MAX_NO_CHEST)
         # 识别多久算失败（s）
         self.timeout: float = p.get("timeout", 3.0)
         # 点击后的等待（s）
         self.wait_after: float = p.get("wait_after", 1.5)
+        # 连续未收货宝箱的计数（本轮会话累计，不随 report 重置）
+        self.consecutive_no_chest: int = 0
         self.report: dict = {
             "uses": 0,
             "chests": 0,
             "villages": 0,
             "unavailable": False,
+            "failed": False,
+            "fail_reason": "",
+            "consecutive_no_chest": 0,
             "finished_at": "",
         }
 
@@ -153,7 +161,26 @@ class SinanEngine:
                 break
 
             # 3.2 处理触发的宝箱/村庄事件（可多个）；处理完再判断是否不可用
+            chests_before = self.report["chests"]
             handled = self._handle_event(on_progress, should_stop)
+            # 本轮是否收到宝箱：以含蓄方法判断 —— 收到宝箱则 chests 计数增加
+            got_chest = self.report["chests"] > chests_before
+            if got_chest:
+                self.consecutive_no_chest = 0
+            else:
+                self.consecutive_no_chest += 1
+                self._log(
+                    on_progress,
+                    f"司南第 {uses} 次未收到宝箱（连续 "
+                    f"{self.consecutive_no_chest}/{self.max_no_chest} 次）")
+                if self.consecutive_no_chest >= self.max_no_chest:
+                    self._log(on_progress,
+                              "连续 3 次使用司南未收到宝箱，判定任务失败")
+                    self.report["failed"] = True
+                    self.report["fail_reason"] = (
+                        f"连续 {self.max_no_chest} 次使用司南未收货宝箱")
+                    break
+            self.report["consecutive_no_chest"] = self.consecutive_no_chest
 
             # 3.3 判断是否还有可用司南：只要面板上还能看到可用司南(sinan_first_item)，
             #     就继续使用 —— 此刻即便 sinan_unavailable_percent 误命中（多为奖励
@@ -265,9 +292,16 @@ class SinanEngine:
 
     def _finish(self, on_progress) -> dict:
         self.report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        self._log(on_progress,
-                  f"司南任务结束：使用 {self.report['uses']} 次，"
-                  f"宝箱 {self.report['chests']} 个，"
-                  f"村民 {self.report['villages']} 次，"
-                  f"不可用={self.report['unavailable']}")
+        if self.report["failed"]:
+            self._log(on_progress,
+                      f"司南任务失败：{self.report['fail_reason']}（"
+                      f"使用 {self.report['uses']} 次，"
+                      f"宝箱 {self.report['chests']} 个，"
+                      f"村民 {self.report['villages']} 次）")
+        else:
+            self._log(on_progress,
+                      f"司南任务结束：使用 {self.report['uses']} 次，"
+                      f"宝箱 {self.report['chests']} 个，"
+                      f"村民 {self.report['villages']} 次，"
+                      f"不可用={self.report['unavailable']}")
         return self.report
