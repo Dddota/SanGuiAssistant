@@ -10,7 +10,6 @@
 - **自动司南**：自动使用所有可用的司南，领取对应奖励；连续 3 次使用司南未收货宝箱则判定任务失败并进入下一任务。
 - **自动刷战功**：从情报城池战事列表识别战斗地点，优先攻打敌众我寡且距离近的城池，自动补兵出征；持续循环刷取直到粮食耗尽、无可攻打目标或累计攻打次数达到上限（默认 20，可配置），攻打失败的城市本会话内标记换城，保证收敛。
 - **辅助交易**：自动扫描交易行中关注物品的上架与求购信息。
-- **智能配将台**：本地武将库筛选 + 选择练度构建阵容并估算战力（第 1 层已实现；识别用户武将、模拟作战克制对比为后续规划）。
 - **设置**：连接参数（ADB 路径 / 模拟器地址 / 资源目录）可编辑并持久化，ADB 支持一键自动检测（常见模拟器路径 + PATH 探测）。
 - **调试**：选择模板对当前屏幕做模板匹配识别，验证识别效果。
 - **全局状态栏**：底部实时显示连接状态、当前任务（含持续执行时间），并提供全局开始/停止。
@@ -59,7 +58,7 @@ powershell -ExecutionPolicy Bypass -File build_release.ps1
 - `app/view/`：GUI 页面
   - `main_window.py`：主窗口（三栏式布局）与导航注册
   - `dashboard.py` / `settings_panel.py` / `log_panel.py` / `status_bar.py`：任务清单、参数面板、共享日志、全局状态栏
-  - `guixin_tab.py` / `sinan_tab.py` / `zhan_gong_tab.py` / `trade_tab.py` / `peijiang_tab.py`：功能页
+  - `guixin_tab.py` / `sinan_tab.py` / `zhan_gong_tab.py` / `trade_tab.py`：功能页
   - `settings_tab.py` / `debug_tab.py`：设置与调试（底部导航弹窗）
 - `app/data/`：武将数据（图鉴 / 用户武将 / 游戏数据加载）
 - `app/assets/pipeline/`：MAA 流程 JSON（`guixin.json` / `sinan.json` / `zhan_gong.json` / `trade.json`）
@@ -79,8 +78,6 @@ powershell -ExecutionPolicy Bypass -File build_release.ps1
 | 辅助交易 | 交易行上架/求购信息扫描 | 已完成 |
 | GUI 整合 | 三栏布局 + 任务清单 + 状态栏 + 设置 + 调试 | 已完成 |
 | 打包发布 | PyInstaller 一键打包脚本 | 已完成 |
-| 配将台第 1 层 | 本地武将筛选 + 战力估算 | 已完成 |
-| 配将台第 2/3 层 | 识别用户武将 / 模拟作战克制对比 | 规划中 |
 
 ## 许可证
 

@@ -45,7 +45,16 @@ class MaaController:
         screencap_methods: int = DEFAULT_SCREENCAP,
         input_methods: int = DEFAULT_INPUT,
     ) -> bool:
-        """连接模拟器。"""
+        """连接模拟器。
+
+        MAA 的 post_connection().wait() 只等动作结束，不保证连接成功
+        （adb 失败仅写入 maafw.log）。连接失败必须抛异常，让上层知道
+        并停止流程，避免假连接让 UI 显示"已连接"。
+        """
+        if not adb_path or not Path(adb_path).is_file():
+            raise ConnectionError(
+                f"adb 不存在: {adb_path!r}，请检查配置或选择有效的模拟器")
+
         self._controller = AdbController(
             adb_path=adb_path,
             address=address,
@@ -53,6 +62,12 @@ class MaaController:
             input_methods=input_methods,
         )
         self._controller.post_connection().wait()
+        if not self._controller.connected:
+            self._controller = None
+            self._connected = False
+            raise ConnectionError(
+                f"无法连接模拟器 {address}（adb: {adb_path}）。"
+                "请确认模拟器已启动、ADB 路径正确，并已开启 ADB 调试。")
         self._connected = True
         logger.info("Controller connected: %s", address)
         self._rebind_tasker()

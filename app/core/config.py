@@ -38,7 +38,7 @@ def detect_adb() -> str:
     """自动探测本机可用的 adb.exe。
 
     依次检查常见模拟器安装路径与 PATH 环境变量，返回第一个存在的；
-    全部未命中时回退到默认 ADB_PATH。
+    全部未命中时返回空字符串，让上层明确报错而不是回退到无效的硬编码路径。
     """
     for cand in _ADB_CANDIDATES:
         if Path(cand).is_file():
@@ -49,7 +49,7 @@ def detect_adb() -> str:
         exe = Path(dir_) / "adb.exe"
         if exe.is_file():
             return str(exe)
-    return ADB_PATH
+    return ""
 
 
 def app_root() -> Path:
