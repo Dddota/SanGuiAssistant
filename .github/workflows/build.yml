@@ -17,6 +17,9 @@ env:
 jobs:
   build:
     runs-on: windows-latest
+    # 需要 contents:write 才能在标签触发时创建 GitHub Release 并上传 zip
+    permissions:
+      contents: write
 
     steps:
       - name: 检出代码
