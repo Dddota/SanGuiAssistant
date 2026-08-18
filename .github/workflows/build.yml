@@ -1,0 +1,70 @@
+# 三归小助手 - GitHub Actions 自动打包
+# 触发：手动(workflow_dispatch) 或 推送 v* 标签(如 v0.1)
+# 在 Windows runner 上用 PyInstaller 构建 onedir，打 zip 后上传为 GH Actions artifact；
+# 若由 tag 触发，则额外创建/更新 GitHub Release 附件。
+name: Build
+
+on:
+  workflow_dispatch:          # 手动触发，Actions 页面可点
+  push:
+    tags:
+      - 'v*'                  # 推送 v0.1 / v1.0 等标签时自动构建并发布
+
+env:
+  # artifact / zip 命名里的版本号：标签触发=标签名(v0.1)，手动触发=Master
+  VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: 清理历史产物
+        run: |
+          if (Test-Path build\build) { Remove-Item build\build -Recurse -Force }
+          if (Test-Path dist) { Remove-Item dist -Recurse -Force }
+
+      - name: PyInstaller 构建
+        run: python -m PyInstaller --noconfirm build.spec
+
+      - name: 复制 assets 资源
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist\SanguiHelper\app" | Out-Null
+          Copy-Item -Path "app\assets" -Destination "dist\SanguiHelper\app\" -Recurse -Force
+
+      - name: 打 ZIP 压缩包
+        shell: pwsh
+        run: |
+          $zip = "dist\SanguiHelper-$env:VERSION.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Push-Location "dist\SanguiHelper"
+          tar -a -c -f "..\SanguiHelper-$env:VERSION.zip" .
+          Pop-Location
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: SanguiHelper-${{ env.VERSION }}
+          path: dist/*.zip
+          retention-days: 30
+
+      - name: 发布到 GitHub Release（仅标签触发）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
