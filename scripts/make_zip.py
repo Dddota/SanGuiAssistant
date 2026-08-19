@@ -15,6 +15,15 @@ import sys
 import zipfile
 from pathlib import PurePosixPath
 
+# GitHub Actions runner（windows-latest）默认控制台编码为 cp1252，
+# 打印中文说明会 UnicodeEncodeError 崩溃（此前的打包失败根因）。
+# 强制标准流用 UTF-8，保证在 CI 与本地都稳定输出。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except AttributeError:
+    pass  # 过老的 Python 无 reconfigure，忽略
+
 
 def make_zip(src_dir: str, out_zip: str) -> None:
     src = os.path.abspath(src_dir)
