@@ -3,7 +3,8 @@
 由于 PyInstaller onedir 主程序运行时其 exe 与关键 DLL 被占用，无法热替换，
 更新流程采用『下载 + 解压到临时目录 + detached PowerShell 脚本接管』：
 
-1. check_for_update()：匿名 GET Gitee `/releases/latest`，比对版本号，
+1. check_for_update()：同时匿名查 Gitee 与 GitHub `/releases/latest`，
+   取版本更高者（同版本优先 Gitee，国内快），比对版本号，
    返回最新版信息（tag / 下载 URL / 发布说明），无可更新时返回 None。
 2. apply_update(info)：下载 zip 到临时目录并解压，生成 updater ps1，
    以独立 PowerShell 进程启动（主程序随后可安全退出）；脚本等待主进程
@@ -33,12 +34,15 @@ from app.core.config import app_root
 
 logger = logging.getLogger("sangui.updater")
 
-# Gitee 仓库与 API 常量（公开仓库，读取无需 token）
+# 双源仓库与 API 常量（均为公开仓库，读取无需 token）
+# Gitee = 国内下载快（你手动同步 zip）；GitHub = 由 Actions 自动产出，永远最新。
+# 检查逻辑：取版本更高者；同版本优先 Gitee。
 OWNER = "Dddota"
 REPO = "SanGuiAssistant"
-_API = f"https://gitee.com/api/v5/repos/{OWNER}/{REPO}"
-_LATEST_URL = f"{_API}/releases/latest"
-_UA = "SanguiHelper-Updater/1.0"
+_GITEE_API = f"https://gitee.com/api/v5/repos/{OWNER}/{REPO}"
+_GITEE_LATEST_URL = f"{_GITEE_API}/releases/latest"
+_GITHUB_LATEST_URL = f"https://api.github.com/repos/{OWNER}/{REPO}/releases/latest"
+_UA = "SanguiHelper-Updater/2.0"
 _LATEST_TIMEOUT = 15
 DOWNLOAD_CHUNK = 1 << 20  # 1 MiB
 COPY_EXE_NAMES = ("SanguiHelper.exe",)
@@ -55,19 +59,18 @@ def parse_version(v: str | None) -> tuple:
     return tuple(nums)
 
 
-def _request(url: str, timeout: int = _LATEST_TIMEOUT) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+def _request(url: str, timeout: int = _LATEST_TIMEOUT, headers: dict | None = None) -> bytes:
+    headers = {"User-Agent": _UA, **(headers or {})}
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
 
 
-def _latest_release() -> Optional[dict]:
-    """从 Gitee 拉取最新 Release 的 tag / 下载 URL / 说明。网络或格式错误抛异常。"""
-    raw = _request(_LATEST_URL)
-    data = json.loads(raw.decode("utf-8"))
+def _parse_release(data: dict) -> dict:
+    """把单个 Release 响应解析为统一结构，找不到 zip 抛异常。"""
     tag = data.get("tag_name", "")
     if not tag:
-        raise RuntimeError("最新 Release 缺少 tag_name")
+        raise RuntimeError("Release 缺少 tag_name")
     assets = data.get("assets") or data.get("attach_files") or []
     zip_asset = next(
         (a for a in assets if a.get("name", "").lower().endswith(".zip")),
@@ -81,6 +84,53 @@ def _latest_release() -> Optional[dict]:
         "download_url": zip_asset.get("browser_download_url", ""),
         "body": data.get("body", ""),
     }
+
+
+def _latest_release_from(url: str, headers: dict | None = None) -> Optional[dict]:
+    """从单个源拉取最新 Release。网络/解析错误抛异常。"""
+    try:
+        raw = _request(url, headers=headers)
+        data = json.loads(raw.decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, ValueError) as e:
+        # 404 = 该源还没有 Release 或临时不可用，返回 None；其它异常上抛
+        if isinstance(e, urllib.error.HTTPError) and e.code == 404:
+            return None
+        raise
+    return _parse_release(data)
+
+
+def _latest_release() -> Optional[dict]:
+    """双源查最新：同时看 Gitee 与 GitHub，取版本更高者；同版本走 Gitee。
+
+    返回统一结构（tag/name/download_url/body），或 None（都不可靠时）。
+    单个源 404 视为"该源无 Release"；两源都失败时上抛最后一次异常。
+    """
+    gitee = github = None
+    err = None
+    for name, url, hdrs in (
+        ("gitee", _GITEE_LATEST_URL, None),
+        ("github", _GITHUB_LATEST_URL, {"Accept": "application/vnd.github+json"}),
+    ):
+        try:
+            r = _latest_release_from(url, headers=hdrs)
+            logger.info("check %s -> %s", name, (r or {}).get("tag"))
+            if name == "gitee":
+                gitee = r
+            else:
+                github = r
+        except Exception as e:  # noqa: BLE001
+            logger.warning("check %s failed: %s", name, e)
+            err = e
+    if gitee is None and github is None:
+        if err:
+            raise err  # 两源都不可用，向上抛
+        return None
+    # 同版本优先 Gitee（国内快）；否则取版本更高者
+    if gitee and github:
+        if parse_version(gitee["tag"]) == parse_version(github["tag"]):
+            return gitee
+        return gitee if parse_version(gitee["tag"]) > parse_version(github["tag"]) else github
+    return gitee or github
 
 
 def check_for_update() -> Optional[dict]:
