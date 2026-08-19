@@ -269,30 +269,48 @@ def _script_pause_ms() -> int:
 def _write_updater_script(info: dict, new_dir: Path, install: Path) -> Path:
     """生成并返回独立更新脚本路径（不执行）。
 
-    脚本职责：等主进程退出 → robocopy 覆盖安装目录 → 重启新 exe → 清理临时目录。
+    脚本职责：等主进程退出 → 备份当前安装目录 → robocopy 覆盖 → 重启新 exe；
+    若覆盖失败则从备份还原（保证旧版本仍可用）并清临时目录。
     """
     pid = os.getpid()
     main_exe = (install / "SanguiHelper.exe").resolve()
     pause = _script_pause_ms()
+    backup = Path(tempfile.gettempdir()) / "sangui_backup"
     lines = [
         "$ErrorActionPreference = 'Stop'",
         f"$mainExe = '{main_exe}'",
         f"$install = '{install}'",
         f"$newDir = '{new_dir}'",
+        f"$backup = '{backup}'",
         f"$pid0 = {pid}",
-        f"Start-Sleep -Milliseconds {pause}",
+        "function Start-App {",
+        "    if (Test-Path $mainExe) { Start-Process -FilePath $mainExe -WorkingDirectory $install }",
+        "}",
+        "Start-Sleep -Milliseconds $pause",
         # 等待主进程（含已退出的竞态）结束
         "for ($i = 0; $i -lt 60; $i++) {",
         "    if (-not (Get-Process -Id $pid0 -ErrorAction SilentlyContinue)) { break }",
         "    Start-Sleep -Milliseconds 500",
         "}",
+        # 备份当前安装目录（可回滚的保险）
+        "if (Test-Path $backup) { Remove-Item $backup -Recurse -Force -ErrorAction SilentlyContinue }",
+        "if (Test-Path $install) { Copy-Item $install $backup -Recurse -Force -ErrorAction Stop }",
         # 覆盖安装：/E 递归空目录 /IS /IT 含相同与更旧文件 /PURGE 删除目标多余文件
         "& robocopy $newDir $install /E /IS /IT /PURGE /NFL /NDL /NJH /NJS /NP | Out-Null",
-        "if ($LASTEXITCODE -ge 8) { throw 'robocopy 覆盖失败 (code ' + $LASTEXITCODE + ')' }",
-        # 清理临时目录
+        "if ($LASTEXITCODE -ge 8) {",
+        "    Write-Output \"install-overwrite-failed code:$LASTEXITCODE; restore backup\"",
+        # 覆盖失败：从备份还原旧版本，保证用户仍可用
+        "    if (Test-Path $backup) {",
+        "        & robocopy $backup $install /E /IS /IT /PURGE /NFL /NDL /NJH /NJS /NP | Out-Null",
+        "    }",
+        "    Start-App",
+        "    exit 1",
+        "}",
+        # 清理临时目录与备份
         "if (Test-Path $newDir) { Remove-Item $newDir -Recurse -Force -ErrorAction SilentlyContinue }",
+        "if (Test-Path $backup) { Remove-Item $backup -Recurse -Force -ErrorAction SilentlyContinue }",
         # 重启新版本
-        "Start-Process -FilePath $mainExe -WorkingDirectory $install",
+        "Start-App",
     ]
     ps1 = Path(tempfile.gettempdir()) / "sangui_updater.ps1"
     ps1.write_text("\r\n".join(lines), encoding="utf-8")
@@ -324,66 +342,76 @@ def apply_update(info: dict, on_progress=None, on_byte_progress=None) -> None:
         on_progress("下载更新包...")
     zip_path = workdir / "package.zip"
 
-    if parts:
-        # 分片模式：下载每个分片到 parts/，再按序拼接为完整 zip
-        parts_dir = workdir / "parts"
-        parts_dir.mkdir(parents=True, exist_ok=True)
-        downloaded_total = 0
-        try:
-            downloaded: list[Path] = []
-            for i, url in enumerate(parts, 1):
-                part_path = parts_dir / f"{i:03d}"
-                if on_progress:
-                    on_progress(f"下载更新包(分片 {i}/{len(parts)})...")
-                part_total = _download(
-                    url, part_path,
-                    on_byte_progress=(
-                        (lambda d, t, off=downloaded_total:
-                            (on_byte_progress and on_byte_progress(off + d, total)))
-                        if on_byte_progress else None
-                    ),
-                )
-                if on_byte_progress:
-                    on_byte_progress(downloaded_total + part_total, total)
-                downloaded_total += part_total
-                downloaded.append(part_path)
-            if on_progress:
-                on_progress("拼接分片...")
-            _join_parts(downloaded, zip_path)
-        finally:
-            shutil.rmtree(parts_dir, ignore_errors=True)
-    else:
-        _download(
-            info["download_url"], zip_path,
-            on_byte_progress=(
-                (lambda d, t: (on_byte_progress and on_byte_progress(d, t)))
-                if on_byte_progress else None
-            ),
-        )
-
-    if on_progress:
-        on_progress("解压更新包...")
-    new_dir = workdir / "new"
-    _extract_zip(zip_path, new_dir)
-
-    # zip 可能包含顶层文件夹；若根下只有一个目录则取其内容
-    subs = [p for p in new_dir.iterdir()] if new_dir.exists() else []
-    if len(subs) == 1 and subs[0].is_dir():
-        inner = subs[0]
-        if not any(p.is_file() and p.name.endswith(".exe") for p in new_dir.iterdir()):
-            new_dir = inner
-
-    if on_progress:
-        on_progress("启动更新脚本...")
-    install = install_dir()
-    ps1 = _write_updater_script(info, new_dir, install)
+    # ---- 下载阶段：任何失败统一归类为"下载失败" ----
     try:
-        subprocess.Popen(
-            ["powershell", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
-             "-File", str(ps1)],
-            creationflags=getattr(subprocess, "DETACHED_PROCESS", 0),
-            close_fds=True,
-            cwd=str(install),
-        )
-    except FileNotFoundError as e:
-        raise RuntimeError("无法启动更新脚本 (找不到 powershell)") from e
+        if parts:
+            # 分片模式：下载每个分片到 parts/，再按序拼接为完整 zip
+            parts_dir = workdir / "parts"
+            parts_dir.mkdir(parents=True, exist_ok=True)
+            downloaded_total = 0
+            try:
+                downloaded: list[Path] = []
+                for i, url in enumerate(parts, 1):
+                    part_path = parts_dir / f"{i:03d}"
+                    if on_progress:
+                        on_progress(f"下载更新包(分片 {i}/{len(parts)})...")
+                    part_total = _download(
+                        url, part_path,
+                        on_byte_progress=(
+                            (lambda d, t, off=downloaded_total:
+                                (on_byte_progress and on_byte_progress(off + d, total)))
+                            if on_byte_progress else None
+                        ),
+                    )
+                    if on_byte_progress:
+                        on_byte_progress(downloaded_total + part_total, total)
+                    downloaded_total += part_total
+                    downloaded.append(part_path)
+                if on_progress:
+                    on_progress("拼接分片...")
+                _join_parts(downloaded, zip_path)
+            finally:
+                shutil.rmtree(parts_dir, ignore_errors=True)
+        else:
+            _download(
+                info["download_url"], zip_path,
+                on_byte_progress=(
+                    (lambda d, t: (on_byte_progress and on_byte_progress(d, t)))
+                    if on_byte_progress else None
+                ),
+            )
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"下载失败: {e}") from e
+
+    # ---- 安装阶段：解压 / 写脚本 / 启动更新脚本，失败归类为"安装失败" ----
+    try:
+        if on_progress:
+            on_progress("解压更新包...")
+        new_dir = workdir / "new"
+        _extract_zip(zip_path, new_dir)
+
+        # zip 可能包含顶层文件夹；若根下只有一个目录则取其内容
+        subs = [p for p in new_dir.iterdir()] if new_dir.exists() else []
+        if len(subs) == 1 and subs[0].is_dir():
+            inner = subs[0]
+            if not any(p.is_file() and p.name.endswith(".exe") for p in new_dir.iterdir()):
+                new_dir = inner
+
+        if on_progress:
+            on_progress("启动更新脚本...")
+        install = install_dir()
+        ps1 = _write_updater_script(info, new_dir, install)
+        try:
+            subprocess.Popen(
+                ["powershell", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
+                 "-File", str(ps1)],
+                creationflags=getattr(subprocess, "DETACHED_PROCESS", 0),
+                close_fds=True,
+                cwd=str(install),
+            )
+        except FileNotFoundError as e:
+            raise RuntimeError("无法启动更新脚本 (找不到 powershell)") from e
+    except RuntimeError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"安装失败: {e}") from e

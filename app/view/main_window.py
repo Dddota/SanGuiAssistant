@@ -8,8 +8,8 @@
 """
 from __future__ import annotations
 
-from PyQt6.QtCore import QSettings
-from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout, QDialog, QMessageBox
+from PyQt6.QtCore import QTimer
+from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout, QDialog, QApplication
 
 from qfluentwidgets import NavigationItemPosition, MSFluentWindow, FluentIcon
 
@@ -103,56 +103,37 @@ class MainWindow(MSFluentWindow):
     # ---- 启动自动更新检查 ----
 
     def _setup_auto_check_update(self) -> None:
-        """启动时后台检查一次更新；发现新版本且用户未忽略则弹窗询问。"""
+        """启动时后台检查一次更新；发现新版本则自动进入更新流程。"""
         self.update_worker = UpdateWorker()  # 持有引用防止被 GC
         self.update_worker.check_done.connect(self._on_auto_check_done)
+        self.update_worker.check_error.connect(self._on_auto_check_error)
         self.update_worker.check()
 
+    def _on_auto_check_error(self, msg: str) -> None:
+        """自动检查失败：写入日志，不打扰用户。"""
+        self.log_panel.append(f"自动检查更新失败：{msg}")
+
     def _on_auto_check_done(self, info: dict) -> None:
-        """自动检查结束：若返回用户未忽略的新版本，弹窗询问是否更新。"""
+        """自动检查结束：若发现新版本则直接自动更新，不再弹窗询问。"""
         if not info or not info.get("tag"):
             return  # 无更新或网络错误，静默
         tag = info.get("tag", "")
-        if tag == self._ignored_update_version():
-            return  # 用户此前已选择“稍后”，本次忽略
-        self._prompt_update(info)
+        self._apply_update_now(info)
 
-    def _ignored_update_version(self) -> str:
-        """读取上次用户选择“稍后”时忽略的版本号（跨启动保持）。"""
-        s = QSettings()
-        return s.value("update/ignored_version", "", type=str)
-
-    def _prompt_update(self, info: dict) -> None:
-        """弹窗询问是否更新；点“更新”则后台应用并退出，“稍后”忽略该版本。"""
+    def _apply_update_now(self, info: dict) -> None:
+        """直接应用更新（下载→应用→自动重启）。供启动自动检查调用。"""
         tag = info.get("tag", "")
-        box = QMessageBox(self)
-        box.setWindowTitle("发现新版本")
-        box.setIcon(QMessageBox.Icon.Information)
-        box.setText(f"发现新版本 {tag}（当前 v{__version__}）")
-        box.setInformativeText("是否立即更新？")
-        update_btn = box.addButton("更新", QMessageBox.ButtonRole.AcceptRole)
-        later_btn = box.addButton("稍后", QMessageBox.ButtonRole.RejectRole)
-        box.setDefaultButton(update_btn)
-        box.exec()
-
-        if box.clickedButton() is update_btn:
-            # 应用更新：后台下载并应用（不等下载，避免 2 秒强制退出杀线程）。
-            # 进度通过日志面板展示，完成后由 apply_done 回调安排退出。
-            self.update_worker.apply(info)
-            self.update_worker.apply_byte_progress.connect(
-                self._on_auto_apply_byte_progress
-            )
-            self.update_worker.apply_done.connect(self._on_auto_apply_done)
-            self.log_panel.append(
-                f"开始自动更新到 {tag}：正在更新包，完成后程序将自动重启。"
-            )
-            QMessageBox.information(
-                self, "正在更新",
-                "正在下载并应用更新，进度请查看右侧日志，完成后程序将自动重启。",
-            )
-        elif box.clickedButton() is later_btn:
-            # 记住本版本，避免每次启动弹窗打扰
-            QSettings().setValue("update/ignored_version", tag)
+        # 应用更新：后台下载并应用，进度通过日志面板展示，
+        # 完成后由 apply_done 回调安排退出（更新脚本接管替换并重启）。
+        self.update_worker.apply(info)
+        self.update_worker.apply_byte_progress.connect(
+            self._on_auto_apply_byte_progress
+        )
+        self.update_worker.apply_done.connect(self._on_auto_apply_done)
+        self.log_panel.append(
+            f"发现新版本 {tag}（当前 v{__version__}），正在自动更新："
+            f"下载并应用更新包，完成后程序将自动重启。"
+        )
 
     def _on_auto_apply_byte_progress(self, downloaded: int, total: int) -> None:
         """自动更新字节进度：低频写入日志面板（每满 ~5% 记一次）。"""
@@ -176,13 +157,11 @@ class MainWindow(MSFluentWindow):
         )
 
     def _on_auto_apply_done(self, ok: bool, msg: str) -> None:
-        """自动更新结束：成功延迟退出（更新脚本接管重启）；失败提示，不退出。"""
+        """自动更新结束：成功延迟退出（更新脚本接管重启）；失败仅写日志，不退出。"""
         if ok:
             self.log_panel.append(f"更新已启动：{msg}")
             # 延迟让界面（日志/进度）刷新后退出，更新脚本接管替换并重启
-            from PyQt6.QtCore import QTimer
-            from PyQt6.QtWidgets import QApplication
             QTimer.singleShot(1500, QApplication.quit)
         else:
-            self.log_panel.append(f"更新失败：{msg}")
-            QMessageBox.warning(self, "更新失败", msg)
+            # 失败仅记录日志，不弹窗；程序保持当前可用状态继续运行
+            self.log_panel.append(f"更新失败：{msg}（当前程序仍可正常使用）")
