@@ -4,9 +4,11 @@ name: Build & Release
 #  1.可选，推 tag（形如 v1.0.0）即可全自动发版： git tag v1.0.0 && git push origin v1.0.0
 #  2.手动：Actions 页 "Run workflow"，输入一个 tag 名（该 tag 需真实存在于远端，供 GitHub Release 使用）
 #
-# 产物双发：
-#  - GitHub Release（软硬件仓库自身，用于对外发布说明）
-#  - Gitee Release（供客户端自动更新读取，国内快，是唯一更新源）
+# 职责：仅在本仓库打 GitHub Release（附 SanguiHelper-v*.zip）。
+#  Gitee Release（客户端自动更新的真正更新源）由国内中继脚本同步：
+#  scripts/gitee_relay.py 跑在能访问公网的国内 Linux 服务器上，把 GitHub Release 的
+#  zip 拉到本地再传 Gitee（GitHub 海外节点直传 Gitee 会被跨境链路阻断）。
+#  注意：本 workflow 不再需要 GITEE_TOKEN secret。
 
 on:
   push:
@@ -62,13 +64,3 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload to Gitee Release
-        shell: pwsh
-        env:
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-          RELEASE_TAG: ${{ env.RELEASE_TAG }}
-          PYTHONIOENCODING: "utf-8"   # 保证 publish_release.py 中文输出在 cp1252 控制台不炸
-        run: |
-          $zip = (Get-ChildItem "dist\SanguiHelper-v*.zip" | Select-Object -First 1).FullName
-          python scripts/publish_release.py --token "$env:GITEE_TOKEN" --zip "$zip" --tag "$env:RELEASE_TAG" --body "由 GitHub Actions 自动发布"

@@ -50,9 +50,9 @@ powershell -ExecutionPolicy Bypass -File build_release.ps1
 
 程序从 Gitee Release 读取最新版本（匿名，无需 token）。发一个可被自动更新的新版本，有**两种**方式：
 
-**方式 A：全自动（推荐，GitHub Actions 白嫖构建机）**
+**方式 A：GitHub Actions 自动打包 + 国内服务器中继到 Gitee（推荐）**
 
-利用 Gitee→GitHub 的同步勾子，推 tag 即可自动在 GitHub 免费构建机上完成打包并双发到 GitHub / Gitee Release：
+利用 Gitee→GitHub 的同步勾子，推 tag 即在 GitHub 免费构建机上完成 Windows 打包并产出 GitHub Release。由于 GitHub 海外节点直传 Gitee 会被跨境链路阻断（大 zip 上传必超时），改为由一台能访问公网的**国内 Linux 服务器**跑 `scripts/gitee_relay.py`，把 GitHub Release 的 zip 拉到本地再传 Gitee Release：
 
 1. 更新 `app/__init__.py` 的 `__version__`（如 `1.1.0`）。
 2. 提交并推送（会经同步勾子镜像到 GitHub）：
@@ -60,18 +60,35 @@ powershell -ExecutionPolicy Bypass -File build_release.ps1
    git add -A && git commit -m "v1.1.0"
    git push origin master
    ```
-3. 打 tag 并推送，触发 Actions：
+3. 打 tag 并推送，触发 GitHub Actions（产出 GitHub Release 的 `SanguiHelper-v1.1.0.zip`）：
    ```bash
    git tag v1.1.0
    git push origin v1.1.0
    ```
-4. 到 GitHub 仓库 Actions 页确认构建通过；完成后 GitHub 与 Gitee 的 Release 都会有 `SanguiHelper-v1.1.0.zip`。
+4. 国内服务器上中继脚本会同步到 Gitee Release（见下方「中继脚本部署」）。
 
-需要一次的配置（见 `.github/workflows/release.yml`）：
-- GitHub 仓库（`Dddota/SanGuiAssistant`）需**公开**，且能被同步勾子带上 tag。
-- 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 添加一个 secret `GITEE_TOKEN`，值为 Gitee 私人令牌（勾选 projects 权限），用于把产物上传到 Gitee Release。
+不依赖 `GITEE_TOKEN`，GitHub 侧无需配置 secret（`verify-token.yml` 属历史验证，可删）。
 
-客户端仍从 Gitee Release 读取更新，国内下载快。
+**中继脚本部署**（国内 Linux 服务器，一次性）：
+
+```bash
+# 在能访问公网的国内服务器上 clone 仓库
+git clone https://gitee.com/Dddota/SanGuiAssistant.git
+cd SanGuiAssistant
+
+# 首次手动同步一次
+python3 scripts/gitee_relay.py --token <GITEE_TOKEN>
+
+# 加入 crontab 定期同步（每小时一次）
+crontab -e
+# 写入：
+#   0 * * * * cd /path/to/SanGuiAssistant && python3 scripts/gitee_relay.py --token <GITEE_TOKEN> >> /var/log/gitee_relay.log 2>&1
+
+# 可选：cron 只同步 >= 某版本，避免把低版本 demo 也带上
+#   python3 scripts/gitee_relay.py --token <TOKEN> --min-tag v1.0.0
+```
+
+脚本幂等；若 Gitee 上有残缺/空 Release（如历史上传失败留下的），会自动清理该 tag 下残缺项再重建。
 
 **方式 B：纯本地手动发版**
 
@@ -91,7 +108,8 @@ powershell -ExecutionPolicy Bypass -File build_release.ps1
 
 - `main.py`：程序入口
 - `build.spec` / `build_release.ps1`：PyInstaller 打包配置与一键发布脚本
-- `scripts/publish_release.py`：上传发布 zip 到 Gitee Release（自动更新数据源）
+- `scripts/publish_release.py`：上传发布 zip 到 Gitee Release（本地手动发版用）
+- `scripts/gitee_relay.py`：国内 Linux 服务器中继脚本（GitHub Release → Gitee Release，配 cron 自动同步）
 - `app/core/`：核心逻辑
   - `maa_controller.py`：封装 MAA 连接 / 截图 / 点击 / 滑动 / 任务执行 / 识别
   - `task_runner.py`：后台单线程任务运行器（连接 + 任务互斥执行）
