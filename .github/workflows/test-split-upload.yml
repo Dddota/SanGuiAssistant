@@ -50,4 +50,8 @@ jobs:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           TAG: test-split-upload
         run: |
-          python scripts/publish_release.py "--token=$env:GITEE_TOKEN" "--tag=$env:TAG" --body "跨境分片直传验证" --prerelease
+          # zip 名由 __version__ 决定（如 SanguiHelper-v1.0.3.zip），与 --tag 无关。
+          # 显式用 --zip 指向实际构建产物，避免 publish_release 按 tag 猜文件名找不到。
+          $zip = (Get-ChildItem dist\*.zip | Select-Object -First 1).FullName
+          Write-Host "uploading from: $zip"
+          python scripts/publish_release.py "--token=$env:GITEE_TOKEN" "--tag=$env:TAG" "--zip=$zip" --body "跨境分片直传验证" --prerelease
