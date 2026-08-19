@@ -7,7 +7,7 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QWidget, QLineEdit, QFormLayout,
-    QApplication,
+    QApplication, QProgressBar,
 )
 from qfluentwidgets import (
     CardWidget, TitleLabel, SubtitleLabel, BodyLabel,
@@ -37,8 +37,10 @@ class SettingsTab(QWidget):
         self.worker.check_done.connect(self._on_check_done)
         self.worker.check_error.connect(self._on_check_error)
         self.worker.apply_progress.connect(self._on_apply_progress)
+        self.worker.apply_byte_progress.connect(self._on_apply_byte_progress)
         self.worker.apply_done.connect(self._on_apply_done)
         self._latest_info: dict | None = None  # 最近一次检查到的最新版信息
+        self._last_byte_pct = -1  # 日志低频刷新的当前 5% 档位
 
         self._init_ui()
         self._load_params()
@@ -125,6 +127,16 @@ class SettingsTab(QWidget):
 
         # 立即更新按钮（发现新版本后才创建并显示）
         self.update_now_btn: PushButton | None = None
+
+        # 下载进度条 + 进度文本（下载开始后才显示）
+        self.update_progress_bar = QProgressBar()
+        self.update_progress_bar.setRange(0, 0)  # 默认不定态/隐藏
+        self.update_progress_bar.hide()
+        update_lay.addWidget(self.update_progress_bar)
+        self.update_progress_label = BodyLabel("")
+        self.update_progress_label.setStyleSheet("color: #999;")
+        self.update_progress_label.hide()
+        update_lay.addWidget(self.update_progress_label)
 
         layout.addWidget(update_card)
         layout.addStretch()
@@ -219,9 +231,9 @@ class SettingsTab(QWidget):
             # 发现新版本
             self._latest_info = info
             tag = info.get("tag", "")
-            self.update_status_label.setText(f"发现新版本 v{tag}")
+            self.update_status_label.setText(f"发现新版本 {tag}")
             self._log_to_panel(
-                f"检查更新：发现新版本 v{tag}（当前 v{__version__}）")
+                f"检查更新：发现新版本 {tag}（当前 v{__version__}）")
             InfoBar.info(
                 title="发现新版本",
                 content=f"发现新版本 {tag}，可以立即更新。",
@@ -279,13 +291,44 @@ class SettingsTab(QWidget):
         self.update_now_btn.setText("更新中...")
         self.update_status_label.setText("正在准备更新...")
         tag = self._latest_info.get("tag", "")
-        self._log_to_panel(f"开始更新到 v{tag}：下载更新包...")
+        self._log_to_panel(f"开始更新到 {tag}：下载更新包...")
+        # 显示进度条，初始设为不定态（尚未有字节信息）
+        self.update_progress_bar.setRange(0, 0)
+        self.update_progress_bar.setValue(0)
+        self.update_progress_bar.show()
+        self.update_progress_label.setText(f"正在下载 {tag}...")
+        self.update_progress_label.show()
         self.worker.apply(self._latest_info)
 
     def _on_apply_progress(self, msg: str) -> None:
         """更新过程中更新状态标签。"""
         self.update_status_label.setText(msg)
         self._log_to_panel(msg)
+
+    def _on_apply_byte_progress(self, downloaded: int, total: int) -> None:
+        """字节级下载进度：更新进度条与文本，低频写日志。"""
+        if total <= 0:
+            # total 未知：不定态动画 + 只显示已下载量
+            self.update_progress_bar.setRange(0, 0)
+            self.update_progress_label.setText(
+                f"{downloaded / 1048576:.0f} MB (下载中...)"
+            )
+            return
+
+        self.update_progress_bar.setRange(0, total)
+        self.update_progress_bar.setValue(downloaded)
+        pct = downloaded / total * 100 if total else 0
+        self.update_progress_label.setText(
+            f"{downloaded / 1048576:.1f} MB / {total / 1048576:.1f} MB ({pct:.0f}%)"
+        )
+        # 每满 ~5% 才记一次日志，避免日志爆炸
+        cur = int(pct // 5)
+        if cur != getattr(self, "_last_byte_pct", -1):
+            self._last_byte_pct = cur
+            self._log_to_panel(
+                f"下载进度：{downloaded / 1048576:.1f} MB / "
+                f"{total / 1048576:.1f} MB ({pct:.0f}%)"
+            )
 
     def _on_apply_done(self, ok: bool, msg: str) -> None:
         """更新结束：失败提示；成功则提示并延迟退出主程序。"""

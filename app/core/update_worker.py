@@ -30,6 +30,7 @@ class UpdateWorker(QObject):
     check_done = pyqtSignal(dict)       # 最新版信息；无更新为 None 或 {}（由连接端判断）
     check_error = pyqtSignal(str)       # 检查过程异常（一般不期望触发）
     apply_progress = pyqtSignal(str)    # 应用更新过程进度提示
+    apply_byte_progress = pyqtSignal(int, int)  # 下载字节累计数, 总字节数(total 未知为 -1)
     apply_done = pyqtSignal(bool, str)  # (成功与否, 消息)
 
     def __init__(self, parent: Optional[QObject] = None):
@@ -66,7 +67,9 @@ class UpdateWorker(QObject):
     def _apply_thread(self, info: dict) -> None:
         try:
             updater.apply_update(
-                info, on_progress=self.apply_progress.emit
+                info,
+                on_progress=self.apply_progress.emit,
+                on_byte_progress=self.apply_byte_progress.emit,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("apply worker raised: %s", e)

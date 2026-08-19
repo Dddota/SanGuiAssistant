@@ -128,7 +128,7 @@ class MainWindow(MSFluentWindow):
         box = QMessageBox(self)
         box.setWindowTitle("发现新版本")
         box.setIcon(QMessageBox.Icon.Information)
-        box.setText(f"发现新版本 v{tag}（当前 v{__version__}）")
+        box.setText(f"发现新版本 {tag}（当前 v{__version__}）")
         box.setInformativeText("是否立即更新？")
         update_btn = box.addButton("更新", QMessageBox.ButtonRole.AcceptRole)
         later_btn = box.addButton("稍后", QMessageBox.ButtonRole.RejectRole)
@@ -136,21 +136,53 @@ class MainWindow(MSFluentWindow):
         box.exec()
 
         if box.clickedButton() is update_btn:
-            # 应用更新并退出主程序（更新脚本接管替换与重启）
+            # 应用更新：后台下载并应用（不等下载，避免 2 秒强制退出杀线程）。
+            # 进度通过日志面板展示，完成后由 apply_done 回调安排退出。
             self.update_worker.apply(info)
+            self.update_worker.apply_byte_progress.connect(
+                self._on_auto_apply_byte_progress
+            )
             self.update_worker.apply_done.connect(self._on_auto_apply_done)
+            self.log_panel.append(
+                f"开始自动更新到 {tag}：正在更新包，完成后程序将自动重启。"
+            )
             QMessageBox.information(
                 self, "正在更新",
-                "正在下载并应用更新，完成后程序将自动重启。",
+                "正在下载并应用更新，进度请查看右侧日志，完成后程序将自动重启。",
             )
-            from PyQt6.QtCore import QTimer
-            from PyQt6.QtWidgets import QApplication
-            QTimer.singleShot(2000, QApplication.quit)
         elif box.clickedButton() is later_btn:
             # 记住本版本，避免每次启动弹窗打扰
             QSettings().setValue("update/ignored_version", tag)
 
+    def _on_auto_apply_byte_progress(self, downloaded: int, total: int) -> None:
+        """自动更新字节进度：低频写入日志面板（每满 ~5% 记一次）。"""
+        if total <= 0:
+            if getattr(self, "_auto_last_pct", None) is None:
+                self._auto_last_pct = 0
+            self.log_panel.append(
+                f"下载进度：{downloaded / 1048576:.0f} MB (下载中...)"
+            )
+            return
+        pct = downloaded / total * 100 if total else 0
+        # 每满 ~5% 才记一次日志，避免日志爆炸
+        cur = int(pct // 5)
+        last = getattr(self, "_auto_last_pct", -1)
+        if cur == last:
+            return
+        self._auto_last_pct = cur
+        self.log_panel.append(
+            f"下载进度：{downloaded / 1048576:.1f} MB / "
+            f"{total / 1048576:.1f} MB ({pct:.0f}%)"
+        )
+
     def _on_auto_apply_done(self, ok: bool, msg: str) -> None:
-        """自动更新结束：#失败提示；成功已由 quit 接管流程。"""
-        if not ok:
+        """自动更新结束：成功延迟退出（更新脚本接管重启）；失败提示，不退出。"""
+        if ok:
+            self.log_panel.append(f"更新已启动：{msg}")
+            # 延迟让界面（日志/进度）刷新后退出，更新脚本接管替换并重启
+            from PyQt6.QtCore import QTimer
+            from PyQt6.QtWidgets import QApplication
+            QTimer.singleShot(1500, QApplication.quit)
+        else:
+            self.log_panel.append(f"更新失败：{msg}")
             QMessageBox.warning(self, "更新失败", msg)

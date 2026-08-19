@@ -183,18 +183,54 @@ def check_for_update() -> Optional[dict]:
     return latest
 
 
-def _download(url: str, dest: Path, on_chunk=None) -> None:
-    """流式下载 url 到 dest，避免大面积内存占用。"""
+def _url_size(url: str) -> int:
+    """探测 url 的资源大小（字节）。无法得知返回 -1（不读 body）。
+
+    优先用 HEAD 请求取 Content-Length；HEAD 不支持时回退到 GET 探测，
+    拿到头部后立即关闭连接，不读取 body，避免整包下载。
+    """
+    for method in ("HEAD", "GET"):
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": _UA}, method=method
+            )
+            with urllib.request.urlopen(req, timeout=_LATEST_TIMEOUT) as resp:
+                cl = resp.headers.get("Content-Length")
+                if cl is not None:
+                    try:
+                        return int(cl)
+                    except ValueError:
+                        return -1
+        except Exception as e:  # noqa: BLE001
+            logger.warning("_url_size(%s, %s) failed: %s", method, url, e)
+    return -1
+
+
+def _download(url: str, dest: Path, on_byte_progress=None) -> int:
+    """流式下载 url 到 dest，避免大面积内存占用。
+
+    on_byte_progress: Optional[Callable[[int, int], None]]，每次下载分块回调
+    (downloaded 累计字节数, total 总字节数)，total 未知时为 -1。
+    返回本次下载资源的总字节数（未知为 -1）。
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
     with urllib.request.urlopen(req, timeout=60) as resp, open(dest, "wb") as f:
+        cl = resp.headers.get("Content-Length")
+        try:
+            total = int(cl) if cl is not None else -1
+        except ValueError:
+            total = -1
+        downloaded = 0
         while True:
             chunk = resp.read(DOWNLOAD_CHUNK)
             if not chunk:
                 break
             f.write(chunk)
-            if on_chunk:
-                on_chunk(len(chunk))
+            downloaded += len(chunk)
+            if on_byte_progress:
+                on_byte_progress(downloaded, total)
+    return total
 
 
 def _join_parts(parts: list[Path], zip_path: Path) -> None:
@@ -263,10 +299,12 @@ def _write_updater_script(info: dict, new_dir: Path, install: Path) -> Path:
     return ps1
 
 
-def apply_update(info: dict, on_progress=None) -> None:
+def apply_update(info: dict, on_progress=None, on_byte_progress=None) -> None:
     """下载并应用更新：下载 → 解压 → 启动独立更新脚本。
 
-    on_progress: Optional[Callable[[str], None]]，用于进度提示。
+    on_progress: Optional[Callable[[str], None]]，用于阶段文本提示。
+    on_byte_progress: Optional[Callable[[int, int], None]]，字节级进度回调
+        (downloaded 累计已下载字节数, total 总字节数)，total 未知为 -1。
     本函数返回即表示"更新脚本已启动"，主程序应随后提示用户并自行退出。
     """
     workdir = Path(tempfile.gettempdir()) / "sangui_update"
@@ -274,21 +312,40 @@ def apply_update(info: dict, on_progress=None) -> None:
         shutil.rmtree(workdir, ignore_errors=True)
     workdir.mkdir(parents=True, exist_ok=True)
 
+    # 按下表计算总大小：分片模式为各分片之和；任一未知则整体 -1
+    parts = info.get("parts")
+    if parts:
+        sizes = [_url_size(u) for u in parts]
+        total = sum(sizes) if all(s >= 0 for s in sizes) else -1
+    else:
+        total = _url_size(info["download_url"])
+
     if on_progress:
         on_progress("下载更新包...")
     zip_path = workdir / "package.zip"
-    parts = info.get("parts")
+
     if parts:
         # 分片模式：下载每个分片到 parts/，再按序拼接为完整 zip
         parts_dir = workdir / "parts"
         parts_dir.mkdir(parents=True, exist_ok=True)
+        downloaded_total = 0
         try:
             downloaded: list[Path] = []
             for i, url in enumerate(parts, 1):
                 part_path = parts_dir / f"{i:03d}"
                 if on_progress:
                     on_progress(f"下载更新包(分片 {i}/{len(parts)})...")
-                _download(url, part_path, on_chunk=None)
+                part_total = _download(
+                    url, part_path,
+                    on_byte_progress=(
+                        (lambda d, t, off=downloaded_total:
+                            (on_byte_progress and on_byte_progress(off + d, total)))
+                        if on_byte_progress else None
+                    ),
+                )
+                if on_byte_progress:
+                    on_byte_progress(downloaded_total + part_total, total)
+                downloaded_total += part_total
                 downloaded.append(part_path)
             if on_progress:
                 on_progress("拼接分片...")
@@ -296,7 +353,13 @@ def apply_update(info: dict, on_progress=None) -> None:
         finally:
             shutil.rmtree(parts_dir, ignore_errors=True)
     else:
-        _download(info["download_url"], zip_path, on_chunk=None)
+        _download(
+            info["download_url"], zip_path,
+            on_byte_progress=(
+                (lambda d, t: (on_byte_progress and on_byte_progress(d, t)))
+                if on_byte_progress else None
+            ),
+        )
 
     if on_progress:
         on_progress("解压更新包...")
