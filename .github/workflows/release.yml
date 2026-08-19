@@ -68,6 +68,7 @@ jobs:
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           RELEASE_TAG: ${{ env.RELEASE_TAG }}
+          PYTHONIOENCODING: "utf-8"   # 保证 publish_release.py 中文输出在 cp1252 控制台不炸
         run: |
           $zip = (Get-ChildItem "dist\SanguiHelper-v*.zip" | Select-Object -First 1).FullName
           python scripts/publish_release.py --token "$env:GITEE_TOKEN" --zip "$zip" --tag "$env:RELEASE_TAG" --body "由 GitHub Actions 自动发布"

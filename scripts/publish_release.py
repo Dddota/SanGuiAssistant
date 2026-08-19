@@ -25,6 +25,14 @@ import uuid
 from pathlib import Path
 from urllib import request
 
+# Windows 控制台 / CI（GitHub Actions windows-latest 默认 cp1252 等）非 UTF-8，
+# 强制标准流用 UTF-8，避免打印中文说明时 UnicodeEncodeError 崩溃。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except AttributeError:
+    pass  # 过老的 Python 无 reconfigure，忽略
+
 OWNER = "Dddota"
 REPO = "SanGuiAssistant"
 API = f"https://gitee.com/api/v5/repos/{OWNER}/{REPO}"
