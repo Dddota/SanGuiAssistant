@@ -67,17 +67,26 @@ def _request(url: str, timeout: int = _LATEST_TIMEOUT, headers: dict | None = No
 
 
 def _parse_release(data: dict) -> dict:
-    """把单个 Release 响应解析为统一结构，找不到 zip 抛异常。"""
+    """把单个 Release 响应解析为统一结构，找不到二进制 zip 抛异常。
+
+    注意：Gitee 会给每个 Release 自动生成 `{tag}.zip` / `{tag}.tar.gz`
+    源码归档附件（按 tag 命名）。必须只认二进制发布包 `SanguiHelper-*.zip`，
+    否则可能误把源码包当成更新包。
+    """
     tag = data.get("tag_name", "")
     if not tag:
         raise RuntimeError("Release 缺少 tag_name")
     assets = data.get("assets") or data.get("attach_files") or []
     zip_asset = next(
-        (a for a in assets if a.get("name", "").lower().endswith(".zip")),
+        (
+            a for a in assets
+            if a.get("name", "").lower().endswith(".zip")
+            and "sanguihelper" in a.get("name", "").lower()
+        ),
         None,
     )
     if not zip_asset:
-        raise RuntimeError(f"Release {tag} 中没有找到 zip 附件")
+        raise RuntimeError(f"Release {tag} 中没有找到 SanguiHelper 二进制 zip 附件")
     return {
         "tag": tag,
         "name": zip_asset.get("name", ""),
