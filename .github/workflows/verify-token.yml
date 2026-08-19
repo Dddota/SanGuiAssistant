@@ -1,0 +1,31 @@
+name: Verify GITEE_TOKEN
+
+# 一次性验证 GITEE_TOKEN secret 是否配置正确：
+#  - Actions 页 -> 本 workflow -> Run workflow（手动触发）
+#  - 看 "Check token" 步骤日志：HTTP 200 = secret 有效可发版；401 = 令牌无效或权限不足
+# 验证完即可删除本文件（纯辅助，不发版、不打 zip）。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check token against Gitee API
+        shell: bash
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${GITEE_TOKEN}" \
+            https://gitee.com/api/v5/user)
+          echo "Gitee API /user -> HTTP $status"
+          if [ "$status" = "200" ]; then
+            echo "==> OK: GITEE_TOKEN 有效，可以发版"
+          elif [ "$status" = "401" ]; then
+            echo "==> FAIL: 401 令牌无效或已失效，请重新生成并更新 secret"
+          else
+            echo "==> 未知响应 $status（$([[ "$status" =~ ^[0-9]+$ ]] && echo '可能是网络/限流，重试一次' || echo '非数字'))"
+            exit 1
+          fi

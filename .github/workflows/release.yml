@@ -1,0 +1,73 @@
+name: Build & Release
+
+# 触发方式：
+#  1.可选，推 tag（形如 v1.0.0）即可全自动发版： git tag v1.0.0 && git push origin v1.0.0
+#  2.手动：Actions 页 "Run workflow"，输入一个 tag 名（该 tag 需真实存在于远端，供 GitHub Release 使用）
+#
+# 产物双发：
+#  - GitHub Release（软硬件仓库自身，用于对外发布说明）
+#  - Gitee Release（供客户端自动更新读取，国内快，是唯一更新源）
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "发版 tag（形如 v1.0.0，需已在远端存在）"
+        required: true
+        default: v1.0.0
+        type: string
+
+permissions:
+  contents: write   # 允许上传 GitHub Release 产物
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'push' && github.ref || format('refs/tags/{0}', github.event.inputs.tag) }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build (PyInstaller + zip)
+        # 版本号从 app/__init__.py 的 __version__ 提取，与 Gitee tag 一致
+        shell: pwsh
+        env:
+          PYTHON: "python"
+        run: |
+          .\build_release.ps1
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.event_name == 'push'
+        with:
+          files: dist/SanguiHelper-v*.zip
+          tag_name: ${{ env.RELEASE_TAG }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload to Gitee Release
+        shell: pwsh
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          $zip = (Get-ChildItem "dist\SanguiHelper-v*.zip" | Select-Object -First 1).FullName
+          python scripts/publish_release.py --token "$env:GITEE_TOKEN" --zip "$zip" --tag "$env:RELEASE_TAG" --body "由 GitHub Actions 自动发布"

@@ -10,6 +10,7 @@
 - **自动司南**：自动使用所有可用的司南，领取对应奖励；连续 3 次使用司南未收货宝箱则判定任务失败并进入下一任务。
 - **自动刷战功**：从情报城池战事列表识别战斗地点，优先攻打敌众我寡且距离近的城池，自动补兵出征；持续循环刷取直到粮食耗尽、无可攻打目标或累计攻打次数达到上限（默认 20，可配置），攻打失败的城市本会话内标记换城，保证收敛。
 - **辅助交易**：自动扫描交易行中关注物品的上架与求购信息。
+- **软件更新**：启动时自动检查 Gitee Release 是否有新版本，可在"设置"里手动检查并一键更新（下载 zip → 独立脚本覆盖替换 → 自动重启）。
 - **设置**：连接参数（ADB 路径 / 模拟器地址 / 资源目录）可编辑并持久化，ADB 支持一键自动检测（常见模拟器路径 + PATH 探测）。
 - **调试**：选择模板对当前屏幕做模板匹配识别，验证识别效果。
 - **全局状态栏**：底部实时显示连接状态、当前任务（含持续执行时间），并提供全局开始/停止。
@@ -43,17 +44,60 @@ python main.py
 powershell -ExecutionPolicy Bypass -File build_release.ps1
 ```
 
-脚本自动完成：清理残留进程 → PyInstaller 构建（onedir）→ 复制 `app/assets` 资源 → 打包 `dist/SanguiHelper-v0.1.zip`（内置 MaaFw 原生 DLL、OCR 模型与全部模板图，首次启动自动检测 ADB）。
+脚本自动完成：清理残留进程 → PyInstaller 构建（onedir）→ 复制 `app/assets` 资源 → 打包 `dist/SanguiHelper-v<版本>.zip`（内置 MaaFw 原生 DLL、OCR 模型与全部模板图，首次启动自动检测 ADB）。版本号统一从 `app/__init__.py` 的 `__version__` 读取。
+
+### 发版与自动更新
+
+程序从 Gitee Release 读取最新版本（匿名，无需 token）。发一个可被自动更新的新版本，有**两种**方式：
+
+**方式 A：全自动（推荐，GitHub Actions 白嫖构建机）**
+
+利用 Gitee→GitHub 的同步勾子，推 tag 即可自动在 GitHub 免费构建机上完成打包并双发到 GitHub / Gitee Release：
+
+1. 更新 `app/__init__.py` 的 `__version__`（如 `1.1.0`）。
+2. 提交并推送（会经同步勾子镜像到 GitHub）：
+   ```bash
+   git add -A && git commit -m "v1.1.0"
+   git push origin master
+   ```
+3. 打 tag 并推送，触发 Actions：
+   ```bash
+   git tag v1.1.0
+   git push origin v1.1.0
+   ```
+4. 到 GitHub 仓库 Actions 页确认构建通过；完成后 GitHub 与 Gitee 的 Release 都会有 `SanguiHelper-v1.1.0.zip`。
+
+需要一次的配置（见 `.github/workflows/release.yml`）：
+- GitHub 仓库（`Dddota/SanGuiAssistant`）需**公开**，且能被同步勾子带上 tag。
+- 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 添加一个 secret `GITEE_TOKEN`，值为 Gitee 私人令牌（勾选 projects 权限），用于把产物上传到 Gitee Release。
+
+客户端仍从 Gitee Release 读取更新，国内下载快。
+
+**方式 B：纯本地手动发版**
+
+1. 更新 `app/__init__.py` 的 `__version__`（如 `1.1.0`）。
+2. 本地打包：`powershell -ExecutionPolicy Bypass -File build_release.ps1`（产物 `dist/SanguiHelper-v1.1.0.zip`）。
+3. 上传到 Gitee Release（需 Gitee 私人令牌，勾选 projects 权限）：
+
+   ```powershell
+   python scripts/publish_release.py --token <私人令牌> [--body "发布说明"]
+   ```
+
+   脚本自动创建 tag `v<__version__>` 并上传 zip。
+
+无论哪种方式，上传完成后，已安装的旧版程序下次启动（或点设置里的"检查更新"）即可发现并一键更新。
 
 ## 目录结构
 
 - `main.py`：程序入口
 - `build.spec` / `build_release.ps1`：PyInstaller 打包配置与一键发布脚本
+- `scripts/publish_release.py`：上传发布 zip 到 Gitee Release（自动更新数据源）
 - `app/core/`：核心逻辑
   - `maa_controller.py`：封装 MAA 连接 / 截图 / 点击 / 滑动 / 任务执行 / 识别
   - `task_runner.py`：后台单线程任务运行器（连接 + 任务互斥执行）
   - `features.py`：任务注册表 + BatchRunner 顺序批处理
   - `guixin / sinan_engine / zhan_gong_engine / trade_engine / hero_scanner / battle_engine`：各功能引擎
+  - `updater.py` / `update_worker.py`：自动更新核心逻辑 + 后台 UI Worker
   - `config.py`：全局配置与持久化（含 ADB 自动检测）
 - `app/view/`：GUI 页面
   - `main_window.py`：主窗口（三栏式布局）与导航注册
@@ -78,6 +122,7 @@ powershell -ExecutionPolicy Bypass -File build_release.ps1
 | 辅助交易 | 交易行上架/求购信息扫描 | 已完成 |
 | GUI 整合 | 三栏布局 + 任务清单 + 状态栏 + 设置 + 调试 | 已完成 |
 | 打包发布 | PyInstaller 一键打包脚本 | 已完成 |
+| 自动更新 | 检查 Gitee Release + 一键下载替换重启 | 已完成 |
 
 ## 许可证
 
