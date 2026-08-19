@@ -48,68 +48,35 @@ powershell -ExecutionPolicy Bypass -File build_release.ps1
 
 ### 发版与自动更新
 
-程序从 Gitee Release 读取最新版本（匿名，无需 token）。发一个可被自动更新的新版本，有**两种**方式：
+程序同时从 GitHub Release 与 Gitee Release 读取最新版本（均匿名，无需 token），取版本更高者；同版本优先走 Gitee。发一个可被自动更新的新版本，完整流程如下：
 
-**方式 A：GitHub Actions 自动打包 + 国内服务器中继到 Gitee（推荐）**
+**GitHub 侧由 Actions 自动打包，Gitee 侧本地分卷上传**
 
-利用 Gitee→GitHub 的同步勾子，推 tag 即在 GitHub 免费构建机上完成 Windows 打包并产出 GitHub Release。由于 GitHub 海外节点直传 Gitee 会被跨境链路阻断（大 zip 上传必超时），改为由一台能访问公网的**国内 Linux 服务器**跑 `scripts/gitee_relay.py`，把 GitHub Release 的 zip 拉到本地再传 Gitee Release：
+GitHub 海外节点直传 Gitee 会被跨境链路阻断（大 zip 上传必超时），且 Gitee 单附件有 100M 大小上限，故拆成两步：
 
-1. 更新 `app/__init__.py` 的 `__version__`（如 `1.1.0`）。
-2. 提交并推送（会经同步勾子镜像到 GitHub）：
+1. 更新 `app/__init__.py` 的 `__version__`（如 `1.0.1`）。
+2. 提交并推送，再打 tag 推送到 Gitee（经同步勾子镜像到 GitHub）：
    ```bash
-   git add -A && git commit -m "v1.1.0"
+   git add -A && git commit -m "v1.0.1"
    git push origin master
+   git tag v1.0.1
+   git push origin v1.0.1
    ```
-3. 打 tag 并推送，触发 GitHub Actions（产出 GitHub Release 的 `SanguiHelper-v1.1.0.zip`）：
-   ```bash
-   git tag v1.1.0
-   git push origin v1.1.0
-   ```
-4. 国内服务器上中继脚本会同步到 Gitee Release（见下方「中继脚本部署」）。
-
-不依赖 `GITEE_TOKEN`，GitHub 侧无需配置 secret（`verify-token.yml` 属历史验证，可删）。
-
-**中继脚本部署**（国内 Linux 服务器，一次性）：
-
-```bash
-# 在能访问公网的国内服务器上 clone 仓库
-git clone https://gitee.com/Dddota/SanGuiAssistant.git
-cd SanGuiAssistant
-
-# 首次手动同步一次
-python3 scripts/gitee_relay.py --token <GITEE_TOKEN>
-
-# 加入 crontab 定期同步（每小时一次）
-crontab -e
-# 写入：
-#   0 * * * * cd /path/to/SanGuiAssistant && python3 scripts/gitee_relay.py --token <GITEE_TOKEN> >> /var/log/gitee_relay.log 2>&1
-
-# 可选：cron 只同步 >= 某版本，避免把低版本 demo 也带上
-#   python3 scripts/gitee_relay.py --token <TOKEN> --min-tag v1.0.0
-```
-
-脚本幂等；若 Gitee 上有残缺/空 Release（如历史上传失败留下的），会自动清理该 tag 下残缺项再重建。
-
-**方式 B：纯本地手动发版**
-
-1. 更新 `app/__init__.py` 的 `__version__`（如 `1.1.0`）。
-2. 本地打包：`powershell -ExecutionPolicy Bypass -File build_release.ps1`（产物 `dist/SanguiHelper-v1.1.0.zip`）。
-3. 上传到 Gitee Release（需 Gitee 私人令牌，勾选 projects 权限）：
-
+   Gitee→GitHub 同步勾子会把代码与 tag 带到 GitHub，push tag 触发反馈同步到 GitHub。GitHub Actions 在 windows runner 上打包，产出 GitHub Release 附件的 `SanguiHelper-v1.0.1.zip`（GitHub 无大小上限）。不依赖 `GITEE_TOKEN`，GitHub 侧无需配置 secret（`verify-token.yml` 属历史验证，可删）。
+3. 本地把同一 zip 上传到 Gitee Release（分卷，绕开 100M 单附件上限；需 Gitee 私人令牌，勾选 projects 权限）：
    ```powershell
    python scripts/publish_release.py --token <私人令牌> [--body "发布说明"]
    ```
+   脚本幂等：自动创建 tag `v<__version__>`，再把 zip 切成 80MB 分片（`SanguiHelper-v1.0.1.zip.001/.002/...`）逐个上传。客户端自动更新会下载全部分片、按序拼回完整包再解压。
 
-   脚本自动创建 tag `v<__version__>` 并上传 zip。
-
-无论哪种方式，上传完成后，已安装的旧版程序下次启动（或点设置里的"检查更新"）即可发现并一键更新。
+无论哪种源，上传完成后，已安装的旧版程序下次启动（或点设置里的"检查更新"）即可发现并一键更新。
 
 ## 目录结构
 
 - `main.py`：程序入口
 - `build.spec` / `build_release.ps1`：PyInstaller 打包配置与一键发布脚本
-- `scripts/publish_release.py`：上传发布 zip 到 Gitee Release（本地手动发版用）
-- `scripts/gitee_relay.py`：国内 Linux 服务器中继脚本（GitHub Release → Gitee Release，配 cron 自动同步）
+- `scripts/publish_release.py`：上传发布 zip 到 Gitee Release，自动分卷绕开 100M 单附件上限（本地手动发版用）
+- `scripts/gitee_relay.py`：国内 Linux 服务器中继脚本（已被本地方卷上传取代，保留备查）
 - `app/core/`：核心逻辑
   - `maa_controller.py`：封装 MAA 连接 / 截图 / 点击 / 滑动 / 任务执行 / 识别
   - `task_runner.py`：后台单线程任务运行器（连接 + 任务互斥执行）

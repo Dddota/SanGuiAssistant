@@ -5,9 +5,8 @@ name: Build & Release
 #  2.手动：Actions 页 "Run workflow"，输入一个 tag 名（该 tag 需真实存在于远端，供 GitHub Release 使用）
 #
 # 职责：仅在本仓库打 GitHub Release（附 SanguiHelper-v*.zip）。
-#  Gitee Release（客户端自动更新的真正更新源）由国内中继脚本同步：
-#  scripts/gitee_relay.py 跑在能访问公网的国内 Linux 服务器上，把 GitHub Release 的
-#  zip 拉到本地再传 Gitee（GitHub 海外节点直传 Gitee 会被跨境链路阻断）。
+#  Gitee Release 由本地方卷上传脚本 scripts/publish_release.py 同步（把 zip 切成 80MB
+#  分片传 Gitee，绕开 100M 单附件上限；GitHub 海外节点直传 Gitee 会被跨境链路阻断）。
 #  注意：本 workflow 不再需要 GITEE_TOKEN secret。
 
 on:
