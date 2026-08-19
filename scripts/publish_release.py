@@ -47,7 +47,8 @@ def load_version(root: Path) -> str:
     return m.group(1)
 
 
-def _api(path: str, method: str, *, token: str, data=None, files=None) -> dict:
+def _api(path: str, method: str, *, token: str, data=None, files=None,
+         timeout: int = 60) -> dict:
     """调 Gitee API。files: {field: (filename, bytes, mime)}。"""
     url = f"{API}{path}?access_token={token}"
     headers = {"User-Agent": "SanguiHelper-Publisher/1.0"}
@@ -62,13 +63,36 @@ def _api(path: str, method: str, *, token: str, data=None, files=None) -> dict:
 
     req = request.Request(url, data=body, headers=headers, method=method)
     try:
-        with request.urlopen(req, timeout=60) as resp:
+        with request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
             return json.loads(raw) if raw else {}
     except request.HTTPError as e:
         detail = e.read().decode("utf-8", "ignore")
         raise SystemExit(
             f"Gitee API {method} {path} 失败 (HTTP {e.code}): {detail}") from e
+
+
+def _find_release_by_tag(tag: str, *, token: str) -> dict | None:
+    """按 tag 查已有 Release。Gitee 的 GET /releases/tags/{tag} 存在则返回，
+    不存在（HTTP 404）返回 None。用于幂等：重跑时不重复创建。"""
+    try:
+        return _api(f"/releases/tags/{tag}", "GET", token=token)
+    except SystemExit as e:
+        msg = str(e)
+        # 404 = 该 tag 还没有 Release，属正常，返回 None
+        if "HTTP 404" in msg:
+            return None
+        raise
+
+
+def _list_attachments(release_id: int, *, token: str) -> dict:
+    """列出某 Release 已上传的附件，用于幂等判断是否已传过同名 zip。"""
+    try:
+        return _api(f"/releases/{release_id}/attach_files", "GET", token=token)
+    except SystemExit as e:
+        if "HTTP 404" in str(e):
+            return {}
+        raise
 
 
 def _multipart(fields: dict, files: dict, boundary: str) -> bytes:
@@ -129,28 +153,49 @@ def main() -> None:
     if not zip_path.is_file():
         raise SystemExit(f"zip 不存在: {zip_path}")
 
-    print(f"==> 创建 Release {tag}")
-    created = _api(
-        "/releases", "POST", token=args.token,
-        data={
-            "tag_name": tag,
-            "target_commitish": "master",
-            "name": f"v{tag}",
-            "body": args.body,
-            "prerelease": "true" if args.prerelease else "false",
-        },
-    )
-    release_id = created.get("id")
-    if not release_id:
-        raise SystemExit(f"创建 Release 成功但未拿到 id: {created}")
+    # 幂等：Release 已存在则复用（如上次上传中途超时），否则新建
+    existing = _find_release_by_tag(tag, token=args.token)
+    if existing and existing.get("id"):
+        release_id = existing["id"]
+        print(f"==> Release {tag} 已存在 (id={release_id})，复用")
+    else:
+        print(f"==> 创建 Release {tag}")
+        created = _api(
+            "/releases", "POST", token=args.token,
+            data={
+                "tag_name": tag,
+                "target_commitish": "master",
+                "name": f"v{tag}",
+                "body": args.body,
+                "prerelease": "true" if args.prerelease else "false",
+            },
+            timeout=120,
+        )
+        release_id = created.get("id")
+        if not release_id:
+            raise SystemExit(f"创建 Release 成功但未拿到 id: {created}")
+
+    # 幂等：该 Release 已传过同名 zip 则跳过上传
+    attach_list = _list_attachments(release_id, token=args.token)
+    if isinstance(attach_list, list):
+        already = [a for a in attach_list
+                   if (a.get("name") == zip_path.name)]
+        if already:
+            url = (already[0].get("browser_download_url")
+                   or already[0].get("download_url"))
+            print(f"==> 附件 {zip_path.name} 已在上次上传，跳过上传 (id={release_id})")
+            print(f"  下载: {url}")
+            return
 
     print(f"==> 上传附件 {zip_path.name} (id={release_id})")
     blob = zip_path.read_bytes()
     ctype = mimetypes.guess_type(zip_path.name)[0] or "application/zip"
+    # 上传超时放大到 600s：Gitee API 从 CI 主机回传 zip 可能很慢
     uploaded = _api(
         f"/releases/{release_id}/attach_files", "POST", token=args.token,
         data={"access_token": args.token},
         files={"file": (zip_path.name, blob, ctype)},
+        timeout=600,
     )
     url = uploaded.get("browser_download_url") or uploaded.get("download_url")
     print("发布完成:")
