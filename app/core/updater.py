@@ -72,11 +72,35 @@ def _parse_release(data: dict) -> dict:
     注意：Gitee 会给每个 Release 自动生成 `{tag}.zip` / `{tag}.tar.gz`
     源码归档附件（按 tag 命名）。必须只认二进制发布包 `SanguiHelper-*.zip`，
     否则可能误把源码包当成更新包。
+
+    分片源（Gitee 分卷上传）：若存在 `SanguiHelper-*.zip.NNN` 分片附件，
+    收集所有分片并按序号升序排列为 parts 列表（此时无 download_url 单键）。
+    单包源（GitHub）：照旧返回含 download_url 的 dict。
     """
     tag = data.get("tag_name", "")
     if not tag:
         raise RuntimeError("Release 缺少 tag_name")
     assets = data.get("assets") or data.get("attach_files") or []
+
+    # 分片正则：SanguiHelper-*.zip 后跟 .NNN（三位数字）
+    part_pat = re.compile(r"SanguiHelper-.*\.zip\.\d{3}$")
+    parts = [
+        (a, a.get("name", "")) for a in assets
+        if part_pat.search(a.get("name", ""))
+    ]
+    if parts:
+        # 按序号升序排序（.001 < .010 < .100 字典序即序号序）
+        parts.sort(key=lambda x: x[1])
+        return {
+            "tag": tag,
+            "name": parts[0][1],
+            "parts": [
+                a.get("browser_download_url", "") for a, _ in parts
+            ],
+            "body": data.get("body", ""),
+        }
+
+    # 单包模式：只认 SanguiHelper-*.zip，避免把 Gitee 源码包当更新包
     zip_asset = next(
         (
             a for a in assets
@@ -173,6 +197,17 @@ def _download(url: str, dest: Path, on_chunk=None) -> None:
                 on_chunk(len(chunk))
 
 
+def _join_parts(parts: list[Path], zip_path: Path) -> None:
+    """把有序分片字节流式追加拼接为完整 zip（不整包读入内存）。
+
+    parts 需已按序号升序排列。stream copy 逐片写入，适合大文件。
+    """
+    with open(zip_path, "wb") as out:
+        for part in parts:
+            with open(part, "rb") as src:
+                shutil.copyfileobj(src, out, length=DOWNLOAD_CHUNK)
+
+
 def _extract_zip(zip_path: Path, target: Path) -> None:
     """解压 zip 到 target。zip 根即发布内容（不含外层文件夹）。"""
     target.mkdir(parents=True, exist_ok=True)
@@ -242,7 +277,26 @@ def apply_update(info: dict, on_progress=None) -> None:
     if on_progress:
         on_progress("下载更新包...")
     zip_path = workdir / "package.zip"
-    _download(info["download_url"], zip_path, on_chunk=None)
+    parts = info.get("parts")
+    if parts:
+        # 分片模式：下载每个分片到 parts/，再按序拼接为完整 zip
+        parts_dir = workdir / "parts"
+        parts_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            downloaded: list[Path] = []
+            for i, url in enumerate(parts, 1):
+                part_path = parts_dir / f"{i:03d}"
+                if on_progress:
+                    on_progress(f"下载更新包(分片 {i}/{len(parts)})...")
+                _download(url, part_path, on_chunk=None)
+                downloaded.append(part_path)
+            if on_progress:
+                on_progress("拼接分片...")
+            _join_parts(downloaded, zip_path)
+        finally:
+            shutil.rmtree(parts_dir, ignore_errors=True)
+    else:
+        _download(info["download_url"], zip_path, on_chunk=None)
 
     if on_progress:
         on_progress("解压更新包...")

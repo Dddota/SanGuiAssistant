@@ -21,6 +21,7 @@ import json
 import mimetypes
 import re
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 from urllib import request
@@ -125,6 +126,51 @@ def urllib_urlencode(data: dict) -> str:
     return urlencode(data)
 
 
+PART_SIZE = 80 * 1024 * 1024  # 80MB，远小于 Gitee 单附件 100M 上限
+
+
+def _split_parts(zip_path: Path, part_size: int = PART_SIZE) -> list[Path]:
+    """按 part_size 字节把 zip 切成连续分片临时文件，返回分片路径列表。
+
+    分片文件名基于 zip_path.name 加上三位零填充序号（从 001 开始），
+    例如 SanguiHelper-v1.0.0.zip -> SanguiHelper-v1.0.0.zip.001 / .002 / ...
+    所有分片按序号顺序字节拼接即可无损还原原 zip。
+    """
+    total = zip_path.stat().st_size
+    parts_dir = Path(tempfile.mkdtemp(
+        prefix=f"partition_{zip_path.name}_",
+        dir=str(zip_path.parent),
+    ))
+    paths: list[Path] = []
+    try:
+        with zip_path.open("rb") as src:
+            index = 1
+            while True:
+                blob = src.read(part_size)
+                if not blob:
+                    break
+                name = f"{zip_path.name}.{index:03d}"
+                part = parts_dir / name
+                part.write_bytes(blob)
+                paths.append(part)
+                index += 1
+        if not paths:
+            raise SystemExit(f"zip 为空或不可读: {zip_path}")
+        return paths
+    except Exception:
+        # 分裂失败时清理已生成的分片
+        for p in paths:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        try:
+            parts_dir.rmdir()
+        except OSError:
+            pass
+        raise
+
+
 def find_zip(root: Path, version: str) -> Path:
     candidates = [
         root / "dist" / f"SanguiHelper-{version}.zip",
@@ -175,35 +221,64 @@ def main() -> None:
         if not release_id:
             raise SystemExit(f"创建 Release 成功但未拿到 id: {created}")
 
-    # 幂等：该 Release 已传过同名 zip 则跳过上传
+    # 分卷上传：把 zip 切成 <100M 的分片逐片上传，绕开 Gitee 单附件 100M 上限。
     attach_list = _list_attachments(release_id, token=args.token)
-    if isinstance(attach_list, list):
-        already = [a for a in attach_list
-                   if (a.get("name") == zip_path.name)]
-        if already:
-            url = (already[0].get("browser_download_url")
-                   or already[0].get("download_url"))
-            print(f"==> 附件 {zip_path.name} 已在上次上传，跳过上传 (id={release_id})")
-            print(f"  下载: {url}")
-            return
+    existing_names = {
+        a.get("name") for a in attach_list
+    } if isinstance(attach_list, list) else set()
 
-    print(f"==> 上传附件 {zip_path.name} (id={release_id})")
-    blob = zip_path.read_bytes()
-    ctype = mimetypes.guess_type(zip_path.name)[0] or "application/zip"
-    # 上传超时放大到 600s：Gitee API 从 CI 主机回传 zip 可能很慢
-    uploaded = _api(
-        f"/releases/{release_id}/attach_files", "POST", token=args.token,
-        data={"access_token": args.token},
-        files={"file": (zip_path.name, blob, ctype)},
-        timeout=600,
-    )
-    url = uploaded.get("browser_download_url") or uploaded.get("download_url")
-    print("发布完成:")
-    print(f"  版本: {tag}")
-    print(f"  附件: {zip_path.name} ({zip_path.stat().st_size} bytes)")
-    print(f"  下载: {url}")
-    if not url:
-        print("  警告: 未拿到下载 URL，可能附件字段名不同，请到 Gitee 网页核对。")
+    parts = _split_parts(zip_path, PART_SIZE)
+    try:
+        urls: dict[str, str] = {}
+        for part in parts:
+            name = part.name
+            # 幂等：该分片已上传过则跳过
+            if name in existing_names:
+                print(f"==> 分片 {name} 已在上次上传，跳过上传 (id={release_id})")
+                url = next(
+                    (a.get("browser_download_url") or a.get("download_url")
+                     for a in attach_list if a.get("name") == name),
+                    "",
+                )
+                urls[name] = url
+                continue
+
+            print(f"==> 上传分片 {name} ({part.stat().st_size} bytes, id={release_id})")
+            blob = part.read_bytes()
+            ctype = mimetypes.guess_type(zip_path.name)[0] or "application/zip"
+            # 上传超时放大到 600s：Gitee API 从 CI 主机回传分片可能很慢
+            uploaded = _api(
+                f"/releases/{release_id}/attach_files", "POST", token=args.token,
+                data={"access_token": args.token},
+                files={"file": (name, blob, ctype)},
+                timeout=600,
+            )
+            urls[name] = (
+                uploaded.get("browser_download_url")
+                or uploaded.get("download_url") or ""
+            )
+
+        print("发布完成:")
+        print(f"  版本: {tag}")
+        print(f"  附件: {zip_path.name} ({zip_path.stat().st_size} bytes) -> {len(parts)} 个分片")
+        for i, part in enumerate(parts, 1):
+            url = urls.get(part.name, "")
+            print(f"  分片 {part.name}: {url}")
+            if not url:
+                print(f"  警告: 未拿到分片 {part.name} 下载 URL，请到 Gitee 网页核对。")
+    finally:
+        # 无论成功失败都清理临时目录下的分片
+        parts_dir = parts[0].parent if parts else None
+        for p in parts:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if parts_dir is not None:
+            try:
+                parts_dir.rmdir()
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
