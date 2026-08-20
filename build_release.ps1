@@ -19,6 +19,14 @@ Write-Host "==> 3/4 复制 app/assets 到发布目录" -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path "$Root\dist\SanguiHelper\app" | Out-Null
 Copy-Item -Path "$Root\app\assets" -Destination "$Root\dist\SanguiHelper\app\" -Recurse -Force
 
+# 合规：剔除已从 Git 移除、仅供本地归档的敏感数据文件（heroes.json 等武将/配将数据），
+# 防止随发布包分发。磁盘本地档案保留，仅不入包。（配将/武将功能链已下线，运行时无引用）
+$SensitiveDataDir = "$Root\dist\SanguiHelper\app\assets\data"
+if (Test-Path $SensitiveDataDir) {
+    Remove-Item -Path $SensitiveDataDir -Recurse -Force
+    Write-Host "  [合规] 已剔除发布包中的敏感数据目录: app/assets/data" -ForegroundColor Yellow
+}
+
 # 复制用户协议到发布包根目录：首次启动协议弹窗依赖此文件（缺失时回退到简化文案）
 if (Test-Path "$Root\TERMS_OF_SERVICE.md") {
     Copy-Item -Path "$Root\TERMS_OF_SERVICE.md" -Destination "$Root\dist\SanguiHelper\" -Force
