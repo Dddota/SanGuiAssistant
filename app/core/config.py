@@ -132,39 +132,225 @@ def save_last_task(key: str) -> None:
     s.sync()
 
 
-def get_zg_city_list() -> list[dict]:
-    """读取战功地点列表（含勾选状态）。"""
+# ---------------- 角色身份 / 命名空间 ----------------
+
+_ZNOW: str = ""  # 进程内当前角色身份（进程级访问器状态，非持久化最新值）
+_LEGACY_MIGRATED_KEY = "zg/legacy_migrated"  # 一次性迁移标记
+
+
+def sanitize_identity(identity: str) -> str:
+    """角色命名空间清洗：去掉 `/`、`|`、控制字符，其余非法字符映射为 `_`。
+
+    用于 `zg/roles/<identity>/...` 键的分段，保证写入 QSettings 安全。
+    """
+    if not identity:
+        return "_unknown"
+    out = []
+    for ch in identity:
+        code = ord(ch)
+        if ch in "/|" or code < 32 or code == 127:
+            continue
+        if (ch.isalnum() or ch == "_" or ch == "-" or ch == "."
+                or '\u4e00' <= ch <= '\u9fff'):
+            out.append(ch)
+        else:
+            out.append("_")
+    cleaned = "".join(out).strip()
+    return cleaned or "_unknown"
+
+
+def _role_key(identity: str, sub: str) -> str:
+    return f"zg/roles/{sanitize_identity(identity)}/{sub}"
+
+
+def set_current_identity(identity: str) -> None:
+    """设置进程级当前角色身份，并持久化到 `zg/last_identity`。"""
+    global _ZNOW
+    sanitized = sanitize_identity(identity)
+    _ZNOW = sanitized if sanitized != "_unknown" else identity
     s = settings()
-    names = s.value("zg_city_names", [], type=list)
-    checked = set(s.value("zg_city_checked", [], type=list))
+    s.setValue("zg/last_identity", sanitized)
+    s.sync()
+
+
+def current_identity() -> str:
+    """进程级当前角色身份（首次调用时从持久化的 last_identity 读取）。"""
+    global _ZNOW
+    if _ZNOW:
+        return _ZNOW
+    s = settings()
+    last = s.value("zg/last_identity", "", str)
+    if last:
+        _ZNOW = last
+        return last
+    return ""
+
+
+def set_role_alias(identity: str, alias: str) -> None:
+    """为该角色设置可选别名（用于替代角色名作为身份命名空间，解决同名撞车）。"""
+    s = settings()
+    alias = (alias or "").strip()
+    s.setValue(_role_key(identity, "alias"), alias)
+    s.sync()
+
+
+def get_role_alias(identity: str) -> str:
+    s = settings()
+    return s.value(_role_key(identity, "alias"), "", str)
+
+
+def role_namespace(identity: str) -> str:
+    """返回该角色应使用的身份命名空间：别名优先，否则角色名。"""
+    alias = get_role_alias(identity)
+    if alias:
+        return sanitize_identity(alias)
+    return sanitize_identity(identity)
+
+
+# ---------------- 角色作用域战功配置 ----------------
+
+def migrate_legacy_zg_config(identity: str) -> None:
+    """一次性迁移旧扁平键到新角色命名空间。
+
+    当旧扁平键（zg_city_names/zg_city_checked/zg_max_time）非空且
+    目标角色键尚未写入时，把旧值播种到该角色下，然后清空旧键并打迁移标记。
+    幂等防御：迁移标记已置或旧键已清空时不再执行。
+    """
+    s = settings()
+    if s.value(_LEGACY_MIGRATED_KEY, False, bool):
+        return
+    leg_names = s.value("zg_city_names", [], type=list)
+    leg_checked = s.value("zg_city_checked", [], type=list)
+    has_legacy = bool(leg_names) or bool(leg_checked) or \
+        s.contains("zg_max_time")
+    if not has_legacy:
+        s.setValue(_LEGACY_MIGRATED_KEY, True)
+        s.sync()
+        return
+    ns = role_namespace(identity)
+    base = f"zg/roles/{sanitize_identity(ns)}"
+    if not s.value(f"{base}/city_names", [], type=list):
+        s.setValue(f"{base}/city_names", leg_names)
+        s.setValue(f"{base}/city_checked", leg_checked)
+        if s.contains("zg_max_time"):
+            s.setValue(f"{base}/max_time", s.value("zg_max_time", 600, int))
+    # 清空旧扁平键
+    s.remove("zg_city_names")
+    s.remove("zg_city_checked")
+    s.remove("zg_max_time")
+    s.setValue(_LEGACY_MIGRATED_KEY, True)
+    s.sync()
+
+
+def get_zg_city_list(identity: str) -> list[dict]:
+    """读取指定角色的战功地点列表（含勾选状态）。"""
+    migrate_legacy_zg_config(identity)
+    s = settings()
+    names = s.value(_role_key(role_namespace(identity), "city_names"), [], type=list)
+    checked = set(s.value(_role_key(role_namespace(identity), "city_checked"), [], type=list))
     return [{"name": n, "checked": n in checked} for n in names]
 
 
-def save_zg_city_list(cities: list[dict]) -> None:
-    """持久化战功地点列表（含勾选状态）。"""
+def save_zg_city_list(identity: str, city_names: list[str],
+                      city_checked: list[str]) -> None:
+    """持久化指定角色的战功地点列表（含勾选状态）。"""
     s = settings()
-    s.setValue("zg_city_names", [c["name"] for c in cities])
-    s.setValue("zg_city_checked", [c["name"] for c in cities if c["checked"]])
+    s.setValue(_role_key(role_namespace(identity), "city_names"), list(city_names))
+    s.setValue(_role_key(role_namespace(identity), "city_checked"), list(city_checked))
     s.sync()
 
 
-def get_zg_ratio() -> float:
+def get_zg_max_time(identity: str) -> int:
+    migrate_legacy_zg_config(identity)
     s = settings()
-    return s.value("zg_ratio", 2.0, float)
+    return s.value(_role_key(role_namespace(identity), "max_time"), 600, int)
 
 
-def save_zg_ratio(v: float) -> None:
+def save_zg_max_time(identity: str, v: int) -> None:
     s = settings()
-    s.setValue("zg_ratio", v)
+    s.setValue(_role_key(role_namespace(identity), "max_time"), int(v))
     s.sync()
 
 
-def get_zg_max_time() -> int:
+def get_zg_max_attacks(identity: str) -> int:
+    migrate_legacy_zg_config(identity)
     s = settings()
-    return s.value("zg_max_time", 600, int)
+    return s.value(_role_key(role_namespace(identity), "max_attacks"), 20, int)
 
 
-def save_zg_max_time(v: int) -> None:
+def save_zg_max_attacks(identity: str, v: int) -> None:
     s = settings()
-    s.setValue("zg_max_time", v)
+    s.setValue(_role_key(role_namespace(identity), "max_attacks"), int(v))
+    s.sync()
+
+
+def save_role_teams(identity: str, team_names: list[str]) -> None:
+    """持久化某角色勾选/读到的出战队伍名列表。"""
+    s = settings()
+    s.setValue(_role_key(role_namespace(identity), "team_names"),
+               [n for n in team_names if n])
+    s.sync()
+
+
+def get_role_teams(identity: str) -> list[str]:
+    s = settings()
+    return s.value(_role_key(role_namespace(identity), "team_names"), [], type=list)
+
+
+def save_role_plan(identity: str, plan: dict) -> None:
+    """持久化某角色的攻打计划 dict（Phase 3 消费）。"""
+    s = settings()
+    s.setValue(_role_key(role_namespace(identity), "plan"), dict(plan or {}))
+    s.sync()
+
+
+def get_role_plan(identity: str) -> dict | None:
+    s = settings()
+    plan = s.value(_role_key(role_namespace(identity), "plan"), None)
+    if isinstance(plan, dict):
+        return plan
+    return None
+
+
+def save_role_priority_address(identity: str, addr: str) -> None:
+    """持久化某角色的优先级地址（Phase 3 消费）。"""
+    s = settings()
+    s.setValue(_role_key(role_namespace(identity), "priority_address"),
+               (addr or "").strip())
+    s.sync()
+
+
+def get_role_priority_address(identity: str) -> str:
+    s = settings()
+    return s.value(_role_key(role_namespace(identity), "priority_address"), "", str)
+
+
+# ---------------- 任务结束收尾动作（多选） ----------------
+def get_post_actions() -> list[str]:
+    """返回勾选集合。优先读新键 post_actions（列表）；回退旧单值键 post_action。"""
+    s = settings()
+    actions = s.value("post_actions", None, list)
+    if actions is None:
+        # 旧版单值回退
+        single = s.value("post_action", "", str)
+        return [single] if single and single != "none" else []
+    return [a for a in actions if isinstance(a, str) and a and a != "none"]
+
+
+def save_post_actions(actions: list[str]) -> None:
+    s = settings()
+    s.setValue("post_actions", [a for a in actions if a and a != "none"])
+    s.setValue("post_action", "none")  # 兼容旧读取路径
+    s.sync()
+
+
+# 旧版单值接口（保留以兼容他处引用，内部委托到新模型）
+def get_post_action() -> str:
+    s = settings()
+    return s.value("post_action", "none", str)
+
+
+def save_post_action(action: str) -> None:
+    s = settings()
+    s.setValue("post_action", (action or "none"))
     s.sync()

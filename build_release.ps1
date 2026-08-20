@@ -19,6 +19,11 @@ Write-Host "==> 3/4 复制 app/assets 到发布目录" -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path "$Root\dist\SanguiHelper\app" | Out-Null
 Copy-Item -Path "$Root\app\assets" -Destination "$Root\dist\SanguiHelper\app\" -Recurse -Force
 
+# 复制用户协议到发布包根目录：首次启动协议弹窗依赖此文件（缺失时回退到简化文案）
+if (Test-Path "$Root\TERMS_OF_SERVICE.md") {
+    Copy-Item -Path "$Root\TERMS_OF_SERVICE.md" -Destination "$Root\dist\SanguiHelper\" -Force
+}
+
 Write-Host "==> 4/4 打 ZIP 压缩包" -ForegroundColor Cyan
 # 版本号统一从 app/__init__.py 的 __version__ 读取，与自动更新/Gitee Release tag 保持一致
 $Version = Select-String -Path "$Root\app\__init__.py" -Pattern "__version__\s*=\s*['\`"]([^'\`"]+)['\`"]" | ForEach-Object { $_.Matches[0].Groups[1].Value }

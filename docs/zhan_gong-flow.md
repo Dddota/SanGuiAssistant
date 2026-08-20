@@ -118,9 +118,10 @@ zhan_gong_start         # 入口
 
 | 文件 | 说明 |
 |---|---|
-| `app/core/zhan_gong_engine.py` | 引擎核心（`ZhanGongEngine` / `BattleLocation`） |
-| `app/core/task_runner.py` | `start_zhan_gong()` / 信号 `zg_progress` / `zg_done` |
-| `app/view/zhan_gong_tab.py` | Tab UI（参数配置 + 日志 + 开始/停止） |
+| `app/core/zhan_gong/` | 引擎包（`engine` 门面 + `navigation`/`list_reader`/`team_panel`/`scoring`/`selection`/`attack`/`report`/`constants`，`ZhanGongEngine` / `BattleLocation`） |
+| `app/core/zhan_gong_engine.py` | 旧入口兼容 shim（re-export 到新包） |
+| `app/core/task_runner.py` | `start_zhan_gong()` / 信号 `zg_progress` / `zg_done` / `zg_teams` / `zg_identity` |
+| `app/view/settings_panel.py` | 战功参数配置（角色作用域 + 优先级地址 + 角色别名） |
 | `app/view/main_window.py` | 导航注册（顶部"自动刷战功"） |
 | `app/view/status_bar.py` | `TASK_NAMES` 注册 `"zhan_gong"` |
 

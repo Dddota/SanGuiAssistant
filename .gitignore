@@ -18,8 +18,25 @@ venv/
 logs/
 screenshots/
 
+# 游戏素材与数据（著作权归游戏厂商，禁止入库）
+# 模板图需由用户自行截图放入本目录；武将底表数据同样不得提交
+app/assets/image/*.png
+app/assets/data/*.json
+app/assets/data/UNIDENTIFIED.md
+
+# 配将/武将功能链（从 Git 移除，本地档案保留；著作权敏感，禁止入库）
+app/view/peijiang_tab.py
+app/core/battle_engine.py
+app/core/team_builder.py
+app/core/hero_scanner.py
+app/data/
+tools/export_hero_data.py
+
 # MAA 运行时生成
 maa_user/
+
+# 合规内审材料（含侵权风险自评，仅本地保留，禁止入库避免作为公开证据）
+COMPLIANCE_REVIEW.md
 
 # 系统文件
 .DS_Store

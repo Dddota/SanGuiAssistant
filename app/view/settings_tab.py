@@ -139,6 +139,7 @@ class SettingsTab(QWidget):
         update_lay.addWidget(self.update_progress_label)
 
         layout.addWidget(update_card)
+
         layout.addStretch()
 
     def _load_params(self) -> None:
