@@ -18,9 +18,8 @@ venv/
 logs/
 screenshots/
 
-# 游戏素材与数据（著作权归游戏厂商，禁止入库）
-# 模板图需由用户自行截图放入本目录；武将底表数据同样不得提交
-app/assets/image/*.png
+# 游戏数据（著作权归游戏厂商，禁止入库）
+# 武将底表数据不得提交；模板图按 MAA 模式公开内置（声明版权归厂商），不在此忽略
 app/assets/data/*.json
 app/assets/data/UNIDENTIFIED.md
 
