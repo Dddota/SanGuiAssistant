@@ -38,6 +38,7 @@ class TaskRunner(QObject):
     zg_progress = pyqtSignal(str)    # 战功引擎日志
     zg_done = pyqtSignal(bool)       # 战功引擎结束
     zg_teams = pyqtSignal(list)      # 战功：读取到的玩家队伍列表
+    zg_identity = pyqtSignal(object) # 战功：角色身份探测结果 dict|None
     sn_progress = pyqtSignal(str)    # 司南引擎日志
     sn_done = pyqtSignal(bool)       # 司南引擎结束
     trade_progress = pyqtSignal(str)  # 辅助交易引擎日志
@@ -105,6 +106,11 @@ class TaskRunner(QObject):
             ctrl.load_resource(self._resource_path)
             self._controller = ctrl
             self.status.emit(True, "连接成功")
+            # 连接成功后尝试探测一次角色身份（仅在大地图时成功；否则优雅 no-op）
+            try:
+                self.probe_identity_async()
+            except Exception as e:  # noqa: BLE001
+                logger.debug("Connect-time identity probe kickoff failed: %s", e)
         except Exception as e:  # noqa: BLE001
             logger.exception("Connect failed")
             self.status.emit(False, str(e))
@@ -267,8 +273,47 @@ class TaskRunner(QObject):
         finally:
             self._running = False
 
+    # ---------------- 角色身份探测 ----------------
+
+    def probe_identity_async(self) -> None:
+        """在后台线程探测角色身份（仅在大地图时有效），结果经 zg_identity 信号返回。
+
+        不强制导航用户界面；若不在大地图则返回 None（优雅 no-op）。
+        """
+        if self._controller is None:
+            self.zg_identity.emit(None)
+            return
+        if self._running or self._connecting:
+            self.zg_identity.emit(None)
+            return
+        ctrl = self._controller
+        t = threading.Thread(
+            target=self._do_probe_identity,
+            args=(ctrl,),
+            daemon=True,
+        )
+        t.start()
+
+    def _do_probe_identity(self, ctrl) -> None:
+        try:
+            from app.core.zhan_gong.identity import probe_identity
+            ident = probe_identity(ctrl)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Probe identity failed")
+            ident = None
+        self.zg_identity.emit(ident)
+
+        # 身份确定（且已知在大地图）→ 设为当前身份。
+        # 注意：不再自动读取队伍（自动读取与手动「读取队伍」各自起独立线程调 MAA，
+        # 并发会触发原生崩溃）。队伍只在用户点「读取队伍」时读取。
+        if ident and ident.get("role"):
+            config.set_current_identity(ident["role"])
+
     def read_my_teams_async(self) -> None:
-        """在后台线程读取大地图右侧玩家队伍列表，结果经 zg_teams 信号返回。"""
+        """在后台线程读取大地图右侧玩家队伍列表，结果经 zg_teams 信号返回。
+
+        若当前已解析出角色身份，则把读取结果持久化到该角色的 team_names 命名空间。
+        """
         if self._controller is None:
             self.zg_teams.emit([])
             return
@@ -289,6 +334,10 @@ class TaskRunner(QObject):
             engine = ZhanGongEngine(ctrl, {})
             teams = engine.read_my_teams()
             self.zg_teams.emit(teams)
+            # 注意：这里不再写 QSettings（current_identity/save_role_teams）。
+            # 该函数在后台线程运行，worker 线程访问 QSettings（含 .sync()）
+            # 可与 GUI 线程的 get_role_teams 并发，触发原生崩溃（无 traceback）。
+            # 队伍名持久化统一移到 GUI 线程槽 _on_teams_read 中完成。
         except Exception as e:  # noqa: BLE001
             logger.exception("Read my teams failed")
             self.zg_teams.emit([])

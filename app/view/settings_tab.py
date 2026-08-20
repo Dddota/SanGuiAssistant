@@ -127,6 +127,7 @@ class SettingsTab(QWidget):
         self.update_now_btn: PushButton | None = None
 
         layout.addWidget(update_card)
+
         layout.addStretch()
 
     def _load_params(self) -> None:

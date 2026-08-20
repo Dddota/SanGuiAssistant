@@ -6,6 +6,8 @@ BatchRunner 会在后台线程里按顺序逐个执行（归心/司南/战功/�
 """
 from __future__ import annotations
 
+import time
+
 from PyQt6.QtCore import QObject, pyqtSignal
 
 
@@ -19,10 +21,10 @@ class TaskDef:
 
 
 TASKS: list[TaskDef] = [
-    TaskDef("guixin", "一键归心", "自动把所有城池的归心次数用完"),
-    TaskDef("sinan", "自动司南", "自动使用所有可用的司南"),
-    TaskDef("zhan_gong", "自动刷战功", "大地图优先攻打敌众我寡且距离近的城池战事"),
-    TaskDef("trade", "辅助交易", "自动扫描交易行中关注物品的上架与求购信息"),
+    TaskDef("guixin", "归心", "自动把所有城池的归心次数用完"),
+    TaskDef("sinan", "司南", "自动使用所有可用的司南"),
+    TaskDef("zhan_gong", "战功", "大地图优先攻打敌众我寡且距离近的城池战事"),
+    TaskDef("trade", "交易", "自动扫描交易行中关注物品的上架与求购信息"),
 ]
 
 TASK_NAMES = {t.key: t.name for t in TASKS}
@@ -50,6 +52,7 @@ class BatchRunner(QObject):
         self._stop = False
         self._wait_done: set[str] = set()
         self._params_fn = None
+        self._started_at: float | None = None  # 本次批量启动的单调时钟时间戳
 
         # 监听所有任务完成信号（done）与引擎进度信号
         runner.finished.connect(lambda ok: self._on_done("guixin", ok))
@@ -77,6 +80,7 @@ class BatchRunner(QObject):
         self._running = True
         self._stop = False
         self._wait_done = set()
+        self._started_at = time.monotonic()
         self.batch_started.emit()
         self._run_next()
         return True
@@ -95,6 +99,11 @@ class BatchRunner(QObject):
         if self._stop or self._index >= len(self._keys):
             ok = not self._stop
             self._running = False
+            if self._started_at is not None:
+                secs = time.monotonic() - self._started_at
+                self._started_at = None
+                self.log.emit(
+                    f"本次批量执行共用时 {self._fmt_elapsed(secs)}")
             self.batch_finished.emit(ok)
             return
         key = self._keys[self._index]
@@ -142,3 +151,15 @@ class BatchRunner(QObject):
         key = self._keys[self._index]
         name = TASK_NAMES.get(key, key)
         self.log.emit(msg)
+
+    @staticmethod
+    def _fmt_elapsed(secs: float) -> str:
+        """把秒格式化为 H 小时 M 分 S 秒。"""
+        secs = int(round(secs))
+        h, rem = divmod(secs, 3600)
+        m, s = divmod(rem, 60)
+        if h:
+            return f"{h} 小时 {m} 分 {s} 秒"
+        if m:
+            return f"{m} 分 {s} 秒"
+        return f"{s} 秒"

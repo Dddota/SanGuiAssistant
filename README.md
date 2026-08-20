@@ -2,6 +2,16 @@
 
 面向手游《三国天下归心》的 MAA 类桌面自动化小助手，运行于 MuMu Player 12 模拟器。
 
+> ## ⚠️ 免责声明
+>
+> - 本工具**仅供学习交流使用**，用于探索桌面自动化与计算机视觉技术，**不用于任何商业代练、打金、账号交易等盈利性活动**。
+> - 使用本工具可能违反游戏运营商服务条款，导致**账号封禁、游戏数据损失**等后果，**由用户自行承担一切风险，开发者不对任何损失负责**。
+> - 本工具与《三国天下归心》开发商**恺英网络及其关联单位无任何关联**，不对任何相关事务负责或背书。
+> - 本工具仅为实现界面识别而随发布包内置部分游戏画面模板图（用于模板匹配），**各模板图的著作权归权利人（恺英网络）所有**；本工具不包含任何游戏客户端素材数据资源。模板图位于 `app/assets/image/`，用户可自行替换或补充。
+> - "三国天下归心"为恺英网络的游戏名称/商标，本项目不使用该名称进行任何商业活动。完整条款见 [TERMS_OF_SERVICE.md](TERMS_OF_SERVICE.md)。
+>
+> 开始使用即表示您已满 18 周岁并同意 [用户协议](TERMS_OF_SERVICE.md) 全部条款。
+
 ## 功能
 
 支持在左侧任务清单勾选多个任务，一键按顺序批量执行（同一时刻互斥只跑一个），进度实时输出到右侧共享日志，底部状态栏显示连接状态、当前任务与持续执行时间。
@@ -81,17 +91,16 @@ GitHub 海外节点直传 Gitee 会被跨境链路阻断（大 zip 上传必超�
   - `maa_controller.py`：封装 MAA 连接 / 截图 / 点击 / 滑动 / 任务执行 / 识别
   - `task_runner.py`：后台单线程任务运行器（连接 + 任务互斥执行）
   - `features.py`：任务注册表 + BatchRunner 顺序批处理
-  - `guixin / sinan_engine / zhan_gong_engine / trade_engine / hero_scanner / battle_engine`：各功能引擎
+  - `guixin / sinan_engine / zhan_gong_engine / trade_engine`：各功能引擎
   - `updater.py` / `update_worker.py`：自动更新核心逻辑 + 后台 UI Worker
   - `config.py`：全局配置与持久化（含 ADB 自动检测）
 - `app/view/`：GUI 页面
   - `main_window.py`：主窗口（三栏式布局）与导航注册
   - `dashboard.py` / `settings_panel.py` / `log_panel.py` / `status_bar.py`：任务清单、参数面板、共享日志、全局状态栏
-  - `guixin_tab.py` / `sinan_tab.py` / `zhan_gong_tab.py` / `trade_tab.py`：功能页
+  - `guixin_tab.py` / `sinan_tab.py` / `trade_tab.py`：功能页
   - `settings_tab.py` / `debug_tab.py`：设置与调试（底部导航弹窗）
-- `app/data/`：武将数据（图鉴 / 用户武将 / 游戏数据加载）
-- `app/assets/pipeline/`：MAA 流程 JSON（`guixin.json` / `sinan.json` / `zhan_gong.json` / `trade.json`）
-- `app/assets/image/`：模板图（识别所用）
+- `app/assets/pipeline/`：MAA 流程 JSON（`guixin.json` / `sinan.json` / `trade.json`；战功已重构为核心代码实现，不依赖 pipeline JSON）
+- `app/assets/image/`：模板图（识别所用）。**为保护游戏著作权，模板图与游戏数据不出现在 Git 仓库中**，请用户自行截图放入（详见 `app/assets/image/README.md`）
 - `app/assets/model/ocr/`：OCR 模型
 
 详细架构见 `docs/architecture.md`。
